@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d0f12">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="See what crop is growing in the fields beside you as you drive, anywhere in the lower 48.">
+  <title>FieldSight</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- Top HUD: app bar + (while driving) the left/right strip -->
+  <header class="hud">
+    <div class="bar">
+      <div class="brand"><img src="icon.svg" alt=""><span>FieldSight</span></div>
+      <div class="status" id="status"><span class="dot"></span><span id="statusText">Ready</span></div>
+      <button class="icon-btn" id="voiceBtn" title="Read crops aloud" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><path class="solid" d="M4 9v6h4l5 4V5L8 9H4z"/><path class="waves" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
+      </button>
+      <button class="icon-btn" id="infoBtn" title="About the data">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+      </button>
+    </div>
+    <button class="strip" id="strip" hidden aria-label="Show details for both sides"></button>
+  </header>
+
+  <!-- Idle: start panel floating over the map -->
+  <section class="welcome" id="welcome">
+    <h1>What's growing beside the road?</h1>
+    <p>Names the fields on your left and right as you drive, anywhere in the lower 48. Or tap any field on the map.</p>
+    <div class="welcome-actions">
+      <button class="primary" id="startBtn">Start driving</button>
+      <button class="ghost" id="exploreBtn">Explore map</button>
+    </div>
+    <p class="fine">Passengers only. If you're driving, turn on voice instead of reading the screen.</p>
+  </section>
+
+  <!-- Map controls -->
+  <div class="map-ctl">
+    <div class="seg" id="layerToggle" aria-label="Crop layer">
+      <button data-layer="live" id="liveLayerBtn" class="on">Live</button>
+      <button data-layer="annual" id="annualLayerBtn">2025</button>
+      <button data-layer="none">Off</button>
+    </div>
+    <button class="icon-btn" id="baseBtn" title="Satellite / dark map">
+      <svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+    </button>
+  </div>
+  <button class="icon-btn recenter" id="recenterBtn" title="Follow my location" hidden>
+    <svg viewBox="0 0 24 24"><path class="solid" d="M12 2l7 19-7-4-7 4z"/></svg>
+  </button>
+  <div class="map-hint" id="mapHint" hidden>Zoom in to see individual fields</div>
+
+  <!-- Detail sheet (tapped field, or both sides while driving) -->
+  <section class="sheet" id="sheet" hidden aria-live="polite">
+    <div class="sheet-head">
+      <span class="grab"></span>
+      <button class="close" id="sheetClose" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body" id="sheetBody"></div>
+  </section>
+
+  <dialog id="about">
+    <form method="dialog">
+      <h2>Where the data comes from</h2>
+      <div class="tier-row"><span class="badge live">Live</span>
+        <p><b>This season's satellite crop map</b> (<span class="live-label">Aug 2026</span>, 10 m). Built from Sentinel-2 and Landsat imagery taken during this growing season and released a few days after each month ends. About 98% accurate for major crops by August. When a field reads clearly, it's marked Live.</p></div>
+      <div class="tier-row"><span class="badge changed">Was …</span>
+        <p>The live map shows a different crop than this field has grown for years, for example vineyards where there were almond orchards. The field may have been replanted, or the satellite may have misread it.</p></div>
+      <div class="tier-row"><span class="badge mixed">Mixed</span>
+        <p>More than one thing in view: a field edge, a farmstead, or two crops side by side.</p></div>
+      <div class="tier-row"><span class="badge annual">USDA <span class="annual-label">2025</span></span>
+        <p><b>USDA NASS Cropland Data Layer</b>, the official annual crop map, released each February for the season before. It's used where the live map has a gap, together with the last five years to predict this year's crop from the rotation.</p></div>
+      <p class="fine">Maps are served by George Mason University's CSISS from USDA NASS data. Crop maps are made of 10–30 m squares, so field edges can be off by one square. While driving, each side is read from a strip 30–130 m off the road, so ditches and shoulders don't count.</p>
+      <button class="primary" value="close">Got it</button>
+    </form>
+  </dialog>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
