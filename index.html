@@ -28,8 +28,8 @@
       <button class="icon-btn" id="voiceBtn" title="Read crops aloud" aria-pressed="false">
         <svg viewBox="0 0 24 24"><path class="solid" d="M4 9v6h4l5 4V5L8 9H4z"/><path class="waves" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
       </button>
-      <button class="icon-btn" id="infoBtn" title="About the data">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+      <button class="icon-btn" id="menuBtn" title="Menu">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       </button>
     </div>
     <button class="strip" id="strip" hidden aria-label="Show details for both sides"></button>
@@ -53,6 +53,9 @@
       <button data-layer="annual" id="annualLayerBtn">2025</button>
       <button data-layer="none">Off</button>
     </div>
+    <button class="icon-btn" id="headBtn" title="North up (tap for heading up)" aria-pressed="false">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path class="solid" d="M12 5l3 7h-6z"/><path d="M9 12l3 7 3-7"/></svg>
+    </button>
     <button class="icon-btn" id="baseBtn" title="Satellite / dark map">
       <svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></svg>
     </button>
@@ -89,7 +92,9 @@
     </form>
   </dialog>
 
+  <script src="config.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -116,63 +116,117 @@ function readTiff(buf) {
   return { w, h, spp, px: out };
 }
 
-// ---------- WMS window fetch ----------
+// ---------- network: optional caching proxy, with direct fallback ----------
+
+const CFG = globalThis.FIELDSIGHT_CONFIG || {};
+const PROXY = (CFG.proxy || '').replace(/\/$/, '');
+const SERVICE_NAME = { [ICROP]: 'icrop', [ANNUAL]: 'cdlall' };
+let proxyDownUntil = 0;
+
+async function timedFetch(url, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try { return await fetch(url, { signal: ctl.signal }); } finally { clearTimeout(timer); }
+}
+
+// Try the proxy (cached, closer, survives upstream hiccups); if it's asleep or down, go direct
+// and leave the proxy alone for a minute.
+export async function wmsFetch(base, query, timeout = TIMEOUT_MS) {
+  if (PROXY && Date.now() > proxyDownUntil) {
+    try {
+      const res = await timedFetch(`${PROXY}/wms/${SERVICE_NAME[base]}?${query}`, 4000);
+      if (res.ok) return res;
+    } catch { /* fall through */ }
+    proxyDownUntil = Date.now() + 60000;
+  }
+  return timedFetch(`${base}?${query}`, timeout);
+}
+
+// A sleeping free-tier proxy takes ~30 s to start; poke it early so it's up by the first lookup.
+export function wakeProxy() {
+  if (PROXY) fetch(`${PROXY}/health`).catch(() => {});
+}
+export const proxyUrl = PROXY;
+
+// ---------- fixed tile grid ----------
+// Lookups read 0.01° tiles (~1.1 km × 0.8 km, ~10 m pixels). Fixed tiles mean consecutive lookups
+// reuse what's already loaded, and identical URLs can be cached by the proxy and for offline use.
 
 const M_PER_DEG = 111320;
-export const WINDOW_M = 170;   // half-width of the area fetched around a point
-const PIX = 35;                // ~10 m pixels across the window
+export const TILE = 0.01;
+const TILE_CACHE_MAX = 600;
 
-function windowFor(lat, lon) {
-  const dLat = WINDOW_M / M_PER_DEG, dLon = WINDOW_M / (M_PER_DEG * Math.cos(lat * Math.PI / 180));
-  return { lat, lon, minx: lon - dLon, maxx: lon + dLon, miny: lat - dLat, maxy: lat + dLat };
+export const tileIndex = (lat, lon) => [Math.floor(lon / TILE + 1e-9), Math.floor(lat / TILE + 1e-9)];
+
+export function tileSpec(i, j) {
+  const minx = i * TILE, miny = j * TILE;
+  return {
+    minx, miny, maxx: minx + TILE, maxy: miny + TILE,
+    w: Math.max(20, Math.round(111.32 * Math.cos((miny + TILE / 2) * Math.PI / 180))), h: 111,
+    bbox: [minx, miny, minx + TILE, miny + TILE].map((v) => v.toFixed(2)).join(','),
+  };
 }
 
-async function fetchGrid(base, layer, win, rgb) {
-  const url = `${base}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=${layer}&STYLES=&SRS=EPSG:4326` +
-    `&BBOX=${win.minx.toFixed(6)},${win.miny.toFixed(6)},${win.maxx.toFixed(6)},${win.maxy.toFixed(6)}` +
-    `&WIDTH=${PIX}&HEIGHT=${PIX}&FORMAT=image/tiff`;
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: ctl.signal });
+export const tileQuery = (layer, t) =>
+  `SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=${layer}&STYLES=&SRS=EPSG:4326&BBOX=${t.bbox}&WIDTH=${t.w}&HEIGHT=${t.h}&FORMAT=image/tiff`;
+
+const tileCache = new Map();   // "layer|i|j" -> Promise<grid>
+
+function getTile(src, i, j) {
+  const key = `${src.layer}|${i}|${j}`;
+  let p = tileCache.get(key);
+  if (p) { tileCache.delete(key); tileCache.set(key, p); return p; }   // LRU touch
+  const t = tileSpec(i, j);
+  p = (async () => {
+    const res = await wmsFetch(src.base, tileQuery(src.layer, t));
     const type = res.headers.get('content-type') || '';
-    if (!res.ok || !type.includes('tiff')) throw new Error(`${layer}: ${res.status} ${type}`);
-    const t = readTiff(await res.arrayBuffer());
-    const codes = new Array(t.w * t.h);
-    for (let i = 0; i < codes.length; i++) {
-      if (rgb || t.spp >= 3) {
-        const o = i * t.spp;
-        codes[i] = rgbToCode(t.px[o], t.px[o + 1], t.px[o + 2]);
+    if (!res.ok || !type.includes('tiff')) throw new Error(`${src.layer}: ${res.status}`);
+    const tif = readTiff(await res.arrayBuffer());
+    const codes = new Uint8Array(tif.w * tif.h);   // 0 = no data
+    for (let k = 0; k < codes.length; k++) {
+      if (src.rgb || tif.spp >= 3) {
+        const o = k * tif.spp;
+        codes[k] = rgbToCode(tif.px[o], tif.px[o + 1], tif.px[o + 2]) ?? 0;
       } else {
-        const c = t.px[i];
-        codes[i] = NO_DATA.has(c) ? null : c;
+        const c = tif.px[k];
+        codes[k] = NO_DATA.has(c) ? 0 : c;
       }
     }
-    return { ...win, w: t.w, h: t.h, codes };
-  } finally { clearTimeout(timer); }
+    return { ...t, w: tif.w, h: tif.h, codes };
+  })();
+  p.catch(() => tileCache.delete(key));
+  tileCache.set(key, p);
+  while (tileCache.size > TILE_CACHE_MAX) tileCache.delete(tileCache.keys().next().value);
+  return p;
 }
 
-function sample(grid, lat, lon) {
-  const col = Math.floor((lon - grid.minx) / (grid.maxx - grid.minx) * grid.w);
-  const row = Math.floor((grid.maxy - lat) / (grid.maxy - grid.miny) * grid.h);
-  if (col < 0 || row < 0 || col >= grid.w || row >= grid.h) return null;
-  return grid.codes[row * grid.w + col];
+function sampleTiles(tiles, lat, lon) {
+  const [i, j] = tileIndex(lat, lon);
+  const g = tiles.get(`${i}|${j}`);
+  if (!g) return null;
+  const col = Math.min(g.w - 1, Math.floor((lon - g.minx) / TILE * g.w));
+  const row = Math.min(g.h - 1, Math.floor((g.maxy - lat) / TILE * g.h));
+  return g.codes[row * g.w + col] || null;
 }
 
 // ---------- layer discovery ----------
 
+const LAYERS_KEY = 'fs.layers';
 let layersPromise;
 export function discoverLayers() {
   layersPromise ??= (async () => {
-    const [ic, an] = await Promise.all([
-      fetch(`${ICROP}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities`).then((r) => r.text()).catch(() => ''),
-      fetch(`${ANNUAL}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities`).then((r) => r.text()).catch(() => ''),
-    ]);
+    const cap = (base) => wmsFetch(base, 'SERVICE=WMS&VERSION=1.1.1&REQUEST=GetCapabilities', 12000).then((r) => r.text()).catch(() => '');
+    const [ic, an] = await Promise.all([cap(ICROP), cap(ANNUAL)]);
     const inseason = [...ic.matchAll(/<Name>cdl_(\d{4})_(\d{2})<\/Name>/g)]
       .map((m) => ({ layer: `cdl_${m[1]}_${m[2]}`, year: +m[1], month: +m[2] }))
       .sort((a, b) => b.year - a.year || b.month - a.month);
     const annual = [...an.matchAll(/<Name>cdl_(\d{4})<\/Name>/g)].map((m) => +m[1]).sort((a, b) => b - a);
     if (!inseason.length && !annual.length) {
+      // Offline or server down: use what we saw last time, if anything.
+      try {
+        const saved = JSON.parse(globalThis.localStorage?.getItem(LAYERS_KEY) || 'null');
+        if (saved) return saved;
+      } catch { /* ignore */ }
       layersPromise = null; // try again on the next lookup
       throw new Error('Could not reach the crop map server');
     }
@@ -180,13 +234,30 @@ export function discoverLayers() {
     // Only use an in-season map if it is newer than the latest official annual map.
     const live = inseason.find((l) => l.year > latestAnnual) || null;
     if (live) live.label = `${MONTHS[live.month - 1]} ${live.year}`;
-    return { live, years: annual.slice(0, HISTORY_YEARS) };
+    const out = { live, years: annual.slice(0, HISTORY_YEARS) };
+    try { globalThis.localStorage?.setItem(LAYERS_KEY, JSON.stringify(out)); } catch { /* ignore */ }
+    return out;
   })();
   return layersPromise;
 }
 
 export const LIVE_WMS = ICROP;
 export const ANNUAL_WMS = ANNUAL;
+
+// Layers a lookup reads: the live map (RGB) plus the annual history (raw codes).
+export function lookupSources(layers, historyYears = layers.years.length) {
+  return [
+    ...(layers.live ? [{ base: ICROP, layer: layers.live.layer, rgb: true, live: true }] : []),
+    ...layers.years.slice(0, historyYears).map((y) => ({ base: ANNUAL, layer: `cdl_${y}`, rgb: false, year: y })),
+  ];
+}
+
+// Fetch tiles just so they land in the offline cache (the service worker stores them).
+export async function prefetchTile(src, i, j) {
+  const res = await wmsFetch(src.base, tileQuery(src.layer, tileSpec(i, j)), 20000);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  await res.arrayBuffer();
+}
 
 // ---------- the lookup ----------
 
@@ -196,7 +267,8 @@ const toDeg = (lat, east, north) => ({
 });
 
 // Sample points for a side of the road (or a disk around the point when there's no heading).
-function patchPoints(lat, lon, heading, side) {
+// lead shifts the road strips forward, e.g. to cover lookup latency or to look ahead.
+function patchPoints(lat, lon, heading, side, lead = 0) {
   const pts = [];
   if (side === 'here') {
     for (let e = -120; e <= 120; e += 20) for (let n = -120; n <= 120; n += 20) {
@@ -218,18 +290,20 @@ function patchPoints(lat, lon, heading, side) {
   const s = side === 'right' ? 1 : -1;
   // Skip the first ~30 m (road, ditch, shoulder); look 30-130 m out, a bit ahead and behind.
   for (const out of [30, 50, 70, 90, 110, 130]) for (const along of [-40, -20, 0, 20, 40, 60]) {
-    const e = right[0] * out * s + fwd[0] * along, n = right[1] * out * s + fwd[1] * along;
+    const a = along + lead;
+    const e = right[0] * out * s + fwd[0] * a, n = right[1] * out * s + fwd[1] * a;
     const d = toDeg(lat, e, n); pts.push([lat + d.dLat, lon + d.dLon]);
   }
   return pts;
 }
 
 // Outline of the sampled strip, for drawing on the map.
-export function sideArea(lat, lon, heading, side) {
+export function sideArea(lat, lon, heading, side, lead = 0) {
   const th = heading * Math.PI / 180, s = side === 'right' ? 1 : -1;
   const fwd = [Math.sin(th), Math.cos(th)], right = [Math.cos(th), -Math.sin(th)];
   return [[25, -45], [135, -45], [135, 65], [25, 65]].map(([out, along]) => {
-    const d = toDeg(lat, right[0] * out * s + fwd[0] * along, right[1] * out * s + fwd[1] * along);
+    const a = along + lead;
+    const d = toDeg(lat, right[0] * out * s + fwd[0] * a, right[1] * out * s + fwd[1] * a);
     return [lat + d.dLat, lon + d.dLon];
   });
 }
@@ -276,30 +350,46 @@ function predict(seq) {
   return { code: last, why: `Same as last year's crop`, strength: 'low' };
 }
 
+export const AHEAD_M = 300;
+
 /**
  * Look up what's growing around a point.
- * mode: { heading } -> left/right of the road; { tapped: true } -> that spot; otherwise -> all around.
+ * mode: { heading, speed } -> left/right of the road, plus the fields ~300 m ahead;
+ *       { tapped: true } -> that spot; otherwise -> all around.
  */
 export async function lookup(lat, lon, mode = {}) {
   const layers = await discoverLayers();
-  const win = windowFor(lat, lon);
-  const jobs = [
-    layers.live ? fetchGrid(ICROP, layers.live.layer, win, true).catch((e) => ({ error: e })) : Promise.resolve(null),
-    ...layers.years.map((y) => fetchGrid(ANNUAL, `cdl_${y}`, win, false).catch((e) => ({ error: e }))),
-  ];
-  const [liveGrid, ...yearGrids] = await Promise.all(jobs);
-  const ok = (g) => g && !g.error;
-  if (!ok(liveGrid) && !yearGrids.some(ok)) throw new Error('The crop map server did not respond');
+  const road = mode.heading != null && !mode.tapped;
+  // Results arrive a moment after the GPS fix, so read a little ahead to be beside the car on arrival.
+  const lead = road ? Math.min(90, (mode.speed || 0) * 1.5) : 0;
+  const groups = mode.tapped ? [['point', 'point', 0]] : road
+    ? [['left', 'left', lead], ['right', 'right', lead], ['aheadLeft', 'left', lead + AHEAD_M], ['aheadRight', 'right', lead + AHEAD_M]]
+    : [['here', 'here', 0]];
+  const patches = groups.map(([key, side, ld]) => ({ key, pts: patchPoints(lat, lon, mode.heading, side, ld) }));
 
-  const sides = mode.tapped ? ['point'] : mode.heading != null ? ['left', 'right'] : ['here'];
-  const result = { lat, lon, at: Date.now(), layers, sides: {} };
+  const need = new Map();
+  for (const { pts } of patches) for (const [a, b] of pts) {
+    const [i, j] = tileIndex(a, b);
+    need.set(`${i}|${j}`, [i, j]);
+  }
+  const sources = lookupSources(layers);
+  const grids = await Promise.all(sources.map(async (src) => {
+    const got = new Map();
+    await Promise.all([...need].map(async ([k, [i, j]]) => {
+      try { got.set(k, await getTile(src, i, j)); } catch { /* missing tile -> no data there */ }
+    }));
+    return got;
+  }));
+  if (grids.every((g) => g.size === 0)) throw new Error('The crop map server did not respond');
 
-  for (const side of sides) {
-    const pts = patchPoints(lat, lon, mode.heading, side);
-    const pick = (g) => (ok(g) ? vote(pts.map(([a, b]) => sample(g, a, b))) : null);
+  const liveIdx = layers.live ? 0 : -1;
+  const yearIdx = layers.years.map((_, n) => n + (layers.live ? 1 : 0));
+  const result = { lat, lon, lead, at: Date.now(), layers, sides: {}, ahead: {} };
 
-    const history = layers.years.map((y, i) => ({ year: y, ...(pick(yearGrids[i]) || { code: null }) })).reverse();
-    let live = pick(liveGrid);
+  for (const { key, pts } of patches) {
+    const pick = (g) => (g.size ? vote(pts.map(([a, b]) => sampleTiles(g, a, b))) : null);
+    const history = layers.years.map((y, n) => ({ year: y, ...(pick(grids[yearIdx[n]]) || { code: null }) })).reverse();
+    let live = liveIdx >= 0 ? pick(grids[liveIdx]) : null;
     if (live && live.coverage < 0.4) live = null; // gap in the in-season map (clouds / missing tile)
 
     // The live map is rendered by color, so shared-color classes come back as the generic one.
@@ -327,10 +417,13 @@ export async function lookup(lat, lon, mode = {}) {
     else tier = 'annual';
 
     const shown = live ? live.code : prediction?.code ?? latest?.code ?? null;
-    result.sides[side] = {
+    const out = {
       tier, code: shown, live, history, prediction,
       agrees: live && prediction ? live.code === prediction.code : null,
     };
+    if (key === 'aheadLeft') result.ahead.left = out;
+    else if (key === 'aheadRight') result.ahead.right = out;
+    else result.sides[key] = out;
   }
   return result;
 }

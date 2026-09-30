@@ -1,14 +1,16 @@
 import {
   lookup, discoverLayers, prettyName, colorOf, isAg, NOTES, sideArea, LIVE_WMS, ANNUAL_WMS,
+  wakeProxy, proxyUrl,
 } from './data.js';
 import { FieldLayer, FIELD_MIN_ZOOM } from './fields.js';
+import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
   status: $('status'), statusText: $('statusText'), strip: $('strip'), welcome: $('welcome'),
-  startBtn: $('startBtn'), exploreBtn: $('exploreBtn'), voiceBtn: $('voiceBtn'), infoBtn: $('infoBtn'),
+  startBtn: $('startBtn'), exploreBtn: $('exploreBtn'), voiceBtn: $('voiceBtn'), menuBtn: $('menuBtn'),
   about: $('about'), recenter: $('recenterBtn'), layerToggle: $('layerToggle'), baseBtn: $('baseBtn'),
-  mapHint: $('mapHint'), sheet: $('sheet'), sheetBody: $('sheetBody'), sheetClose: $('sheetClose'),
+  headBtn: $('headBtn'), mapHint: $('mapHint'), sheet: $('sheet'), sheetBody: $('sheetBody'), sheetClose: $('sheetClose'),
 };
 
 const state = {
@@ -17,15 +19,17 @@ const state = {
   prevFix: null,
   heading: null,
   following: true,
+  headingUp: localGet('fs.headingUp') === '1',
   lastQuery: null,       // {lat, lon, heading, mode, t}
   lastDrive: null,       // latest left/right (or "around you") result
   inFlight: false,
-  sheet: null,           // null | 'drive' | 'tap'
+  sheet: null,           // null | 'drive' | 'tap' | 'menu' | 'trip' | 'offline' | 'routes'
   tapSeq: 0,             // latest tap, so a slow earlier tap can't overwrite it
   serverDown: false,
   lastSpoken: {},
   voice: localGet('fs.voice') === '1',
   layers: null,
+  trip: loadTrip(),
 };
 
 function localGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -34,11 +38,15 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 
 // ---------- map ----------
 
-const map = L.map('map', { zoomControl: false, attributionControl: true, zoomSnap: 0.5 }).setView([39.5, -96.5], 5);
+const map = L.map('map', {
+  zoomControl: false, attributionControl: true, zoomSnap: 0.5,
+  rotate: true, bearing: 0, touchRotate: false, shiftKeyRotate: false, rotateControl: false, compassBearing: false,
+}).setView([39.5, -96.5], 5);
 map.attributionControl.setPrefix(false);
 
-for (const [name, z] of [['fields', 350], ['labels', 420], ['fieldLabels', 560]]) {
-  map.createPane(name);
+// Fields and road labels turn with the map in heading-up mode; field name labels stay upright.
+for (const [name, z] of [['fields', 350], ['labels', 420]]) {
+  map.createPane(name, map._rotatePane || undefined);
   map.getPane(name).style.zIndex = z;
   map.getPane(name).style.pointerEvents = 'none';
 }
@@ -69,14 +77,15 @@ map.attributionControl.addAttribution('Crops: USDA NASS, GMU CSISS');
 
 // Crops: pixel tiles when zoomed out, outlined + labeled fields when zoomed in.
 const fields = new FieldLayer(map, {
+  pane: 'fields', labelPane: 'markerPane',
   onLoading: (on) => { if (state.mode !== 'drive') setStatus(on ? 'Loading fields…' : 'Ready', on ? 'busy' : ''); },
-  // Keep labels out from under the top bar and the bottom panel.
+  // Keep labels out from under the top bar and a bottom panel.
   insets: () => {
-    const h = document.querySelector('.hud').getBoundingClientRect();
-    const covered = [els.sheet, els.welcome].filter((e) => !e.hidden).map((e) => e.getBoundingClientRect())
-      .filter((r) => r.width < window.innerWidth * 0.9 ? false : true);
-    const bottomTop = covered.length ? Math.min(...covered.map((r) => r.top)) : window.innerHeight;
-    return { top: h.bottom, bottom: window.innerHeight - bottomTop };
+    const top = document.querySelector('.hud').getBoundingClientRect().bottom;
+    const panels = [els.sheet, els.welcome].filter((e) => !e.hidden).map((e) => e.getBoundingClientRect())
+      .filter((r) => r.width > window.innerWidth * 0.9);
+    // With no panel open, leave room for the map buttons along the bottom.
+    return { top, bottom: panels.length ? window.innerHeight - Math.min(...panels.map((r) => r.top)) : 76 };
   },
 });
 const crop = { which: localGet('fs.layer') || 'live', tiles: null };
@@ -122,6 +131,7 @@ const meIcon = L.divIcon({
 });
 let meMarker = null;
 const areaLayer = L.layerGroup().addTo(map);
+const routeLayer = L.layerGroup().addTo(map);
 let tapPin = null;
 
 map.on('dragstart', () => {
@@ -132,6 +142,27 @@ els.recenter.addEventListener('click', () => {
   if (state.fix) follow(true);
 });
 map.on('click', (e) => onMapTap(e.latlng.lat, e.latlng.lng));
+
+// ---------- heading-up ----------
+
+function setHeadingUp(on) {
+  state.headingUp = on;
+  localSet('fs.headingUp', on ? '1' : '0');
+  els.headBtn.setAttribute('aria-pressed', String(on));
+  els.headBtn.title = on ? 'Heading up (tap for north up)' : 'North up (tap for heading up)';
+  if (!on) map.setBearing(0);
+  else if (state.heading != null) map.setBearing(-state.heading);
+  updateArrow();
+  fields.relabel();
+  if (state.fix && state.following) follow(false);
+}
+els.headBtn.addEventListener('click', () => setHeadingUp(!state.headingUp));
+
+// The arrow points the way you're going on screen: straight up in heading-up mode.
+function updateArrow() {
+  const rot = state.headingUp ? 0 : state.heading ?? 0;
+  meMarker?.getElement()?.querySelector('.dir')?.setAttribute('transform', `rotate(${rot} 15 15)`);
+}
 
 // ---------- data sources ----------
 
@@ -148,6 +179,7 @@ discoverLayers().then((layers) => {
   for (const el of document.querySelectorAll('.annual-label')) el.textContent = annualYear;
   setCrop(crop.which);
 }).catch(() => setStatus('Crop map server unreachable', 'err'));
+wakeProxy();
 
 // ---------- status ----------
 
@@ -165,6 +197,7 @@ function driveStatus(busy) {
   if (f.speed != null) parts.push(`${Math.round(f.speed * 2.237)} mph`);
   if (state.heading != null && f.speed > 2.5) parts.push(compass(state.heading));
   if (!parts.length) parts.push('GPS');
+  if (!navigator.onLine) return setStatus(`${parts.join(' · ')} · offline`, 'err');
   if (state.serverDown) return setStatus(`${parts.join(' · ')} · map slow`, 'err');
   setStatus(parts.join(' · '), `on${busy ? ' busy' : ''}`);
 }
@@ -187,10 +220,12 @@ const angleDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
 
 // ---------- driving ----------
 
-// Keep the car a little below center so more of the road ahead shows under the HUD.
+// Keep the car below center so more of the road ahead is visible under the HUD.
 function follow(animate) {
   const f = state.fix, z = map.getZoom() < 14 ? 16 : map.getZoom();
-  const p = map.project([f.lat, f.lon], z).subtract([0, map.getSize().y * 0.12]);
+  if (state.headingUp && state.heading != null) map.setBearing(-state.heading);
+  const h = (state.headingUp ? state.heading ?? 0 : 0) * Math.PI / 180, d = map.getSize().y * 0.18;
+  const p = map.project([f.lat, f.lon], z).add([Math.sin(h) * d, -Math.cos(h) * d]);
   map.setView(map.unproject(p, z), z, { animate });
 }
 
@@ -208,8 +243,9 @@ function onFix(f) {
   const ll = [f.lat, f.lon];
   if (!meMarker) meMarker = L.marker(ll, { icon: meIcon, interactive: false, zIndexOffset: 1000 }).addTo(map);
   else meMarker.setLatLng(ll);
-  meMarker.getElement()?.querySelector('.dir')?.setAttribute('transform', `rotate(${state.heading ?? 0} 15 15)`);
-  if (state.following && state.sheet !== 'tap') follow(true);
+  updateArrow();
+  // Don't pull the map away while the user is looking at a tapped field or a route.
+  if (state.following && !['tap', 'offline', 'routes'].includes(state.sheet)) follow(true);
 
   driveStatus(state.inFlight);
   maybeQuery();
@@ -227,7 +263,7 @@ function maybeQuery() {
     || distM(q, f) >= 90
     || (mode === 'road' && angleDiff(q.heading, state.heading) > 35)
     || Date.now() - q.t > 30000;
-  if (due) driveQuery(f.lat, f.lon, mode === 'road' ? { heading: state.heading } : {});
+  if (due) driveQuery(f.lat, f.lon, mode === 'road' ? { heading: state.heading, speed: f.speed } : {});
 }
 
 async function driveQuery(lat, lon, opts) {
@@ -240,11 +276,12 @@ async function driveQuery(lat, lon, opts) {
     state.lastDrive = { res, opts };
     renderStrip(res);
     drawSideAreas(res, opts);
+    logTrip(res);
     if (state.sheet === 'drive') openDriveSheet();
     announce(res);
   } catch {
     state.serverDown = true;
-    if (!state.lastDrive) renderStripMessage('Crop map server is slow. Retrying…');
+    if (!state.lastDrive) renderStripMessage(navigator.onLine ? 'Crop map server is slow. Retrying…' : 'No signal. Save routes ahead of time for offline use.');
     // Retry in ~5 s (or sooner if we move 90 m) rather than hammering the server every GPS fix.
     state.lastQuery.t = Date.now() - 25000;
   } finally {
@@ -275,9 +312,14 @@ function renderStrip(res) {
     const s = res.sides[k];
     const name = s.code != null ? prettyName(s.code) : 'No data';
     const label = k === 'left' ? '◂ Left' : k === 'right' ? 'Right ▸' : SIDE_NAME[k];
+    // "Then …": the crop ~300 m ahead on this side, when it changes.
+    const a = res.ahead?.[k];
+    const then = a && a.code != null && a.code !== s.code && isAg(a.code)
+      ? `<div class="then">then <span class="swatch" style="background:${colorOf(a.code)}"></span>${esc(prettyName(a.code))}</div>` : '';
     return `<div class="side-cell tier-${s.tier}">
       <div class="lbl"><span>${label}</span>${tierTag(s, res.layers)}</div>
       <div class="name"><span class="swatch" style="background:${s.code != null ? colorOf(s.code) : 'var(--line)'}"></span><span>${esc(name)}</span></div>
+      ${then}
     </div>`;
   }).join('');
 }
@@ -296,15 +338,50 @@ function drawSideAreas(res, opts) {
   areaLayer.clearLayers();
   if (opts.heading == null) return;
   for (const side of ['left', 'right']) {
-    L.polygon(sideArea(res.lat, res.lon, opts.heading, side), {
+    L.polygon(sideArea(res.lat, res.lon, opts.heading, side, res.lead), {
       color: '#ffffff', weight: 1.5, opacity: 0.7, dashArray: '4 5', fill: false, interactive: false,
     }).addTo(areaLayer);
   }
 }
 
+// ---------- crop progress (via the proxy) ----------
+
+const PROGRESS_CODES = new Set([1, 5, 2, 3, 4, 21, 28, 24, 23, 22, 6, 10, 41, 31, 42]);
+const progressCache = new Map();
+
+function progressSlot(lat, lon, code) {
+  if (!proxyUrl || !PROGRESS_CODES.has(code)) return '';
+  return `<div class="progress" data-lat="${lat}" data-lon="${lon}" data-crop="${code}"></div>`;
+}
+
+async function fillProgress() {
+  for (const el of els.sheetBody.querySelectorAll('.progress:not([data-done])')) {
+    el.dataset.done = '1';
+    const { lat, lon, crop: code } = el.dataset;
+    const key = `${code}:${(+lat).toFixed(0)}:${(+lon).toFixed(0)}`;
+    let p = progressCache.get(key);
+    if (!p) {
+      p = fetch(`${proxyUrl}/progress?lat=${lat}&lon=${lon}&crop=${code}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      progressCache.set(key, p);
+    }
+    const data = await p;
+    if (!data || !el.isConnected) continue;
+    const prev = Object.fromEntries((data.progress.prev || []).map((r) => [r.what, r.pct]));
+    const rows = data.progress.now.map((r) => {
+      const delta = prev[r.what] != null && r.pct !== prev[r.what] ? ` <em>${r.pct - prev[r.what] > 0 ? '+' : ''}${r.pct - prev[r.what]}</em>` : '';
+      return `<div class="prow"><span>${esc(r.what)}</span><i><b style="width:${Math.max(0, Math.min(100, r.pct))}%"></b></i><span>${r.pct}%${delta}</span></div>`;
+    });
+    const cond = data.condition.now;
+    const ge = cond.filter((r) => r.what === 'good' || r.what === 'excellent').reduce((s, r) => s + r.pct, 0);
+    const week = data.progress.week || data.condition.week;
+    el.innerHTML = `<div class="ptitle">${esc(data.state)} ${esc(data.commodity)} this week${week ? ` <span>(USDA, week ending ${esc(new Date(week + 'T12:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))})</span>` : ''}</div>
+      ${rows.join('')}${cond.length ? `<div class="pcond">Condition: <b>${ge}% good–excellent</b></div>` : ''}`;
+  }
+}
+
 // ---------- detail sheet ----------
 
-function detail(sideKey, s, layers, extraFacts = '') {
+function detail(sideKey, s, layers, { facts = '', lat, lon } = {}) {
   const liveLabel = layers.live?.label;
   const outside = s.code == null && !s.live && s.history.every((h) => h.code == null);
   const name = s.code != null ? prettyName(s.code) : outside ? 'Not mapped' : 'No data here';
@@ -345,7 +422,7 @@ function detail(sideKey, s, layers, extraFacts = '') {
   const runner = s.tier === 'live-mixed' && s.live?.runner && s.live.runner.share > 0.15
     ? `<div class="runner">and <b>${esc(prettyName(s.live.runner.code))}</b></div>` : '';
   const note = NOTES[s.code] && s.tier !== 'live-cover' ? `<p class="note">${esc(NOTES[s.code])}</p>` : '';
-  const facts = extraFacts ? `<div class="facts">${extraFacts}</div>` : '';
+  const factsHtml = facts ? `<div class="facts">${facts}</div>` : '';
 
   const nowYear = layers.live?.year ?? (layers.years[0] + 1);
   const cells = s.history.map((h) => `<div class="yr" title="${h.year}: ${h.code != null ? esc(prettyName(h.code)) : 'no data'}"><i style="background:${h.code != null ? colorOf(h.code) : 'var(--line)'}"></i>${String(h.year).slice(2)}</div>`);
@@ -356,8 +433,9 @@ function detail(sideKey, s, layers, extraFacts = '') {
       <div class="crop"><span class="swatch" style="background:${s.code != null ? colorOf(s.code) : 'var(--line)'}"></span><span class="crop-name">${esc(name)}</span></div>
       ${runner}
       <div class="badges">${badges.join('')}</div>
-      ${facts}${extra}${note}
+      ${factsHtml}${extra}${note}
       <div class="history" style="--n:${cells.length}">${cells.join('')}</div>
+      ${lat != null && s.code != null ? progressSlot(lat, lon, s.code) : ''}
     </article>`;
 }
 
@@ -368,12 +446,13 @@ function showSheet(kind, html, two = false) {
   els.sheet.hidden = false;
   document.body.classList.add('sheet-open');
   fields.relabel();
+  fillProgress();
 }
 
 function openDriveSheet() {
   const { res } = state.lastDrive;
   const keys = Object.keys(res.sides);
-  showSheet('drive', keys.map((k) => detail(k, res.sides[k], res.layers)).join(''), keys.length === 2);
+  showSheet('drive', keys.map((k) => detail(k, res.sides[k], res.layers, { lat: res.lat, lon: res.lon })).join(''), keys.length === 2);
 }
 
 function closeSheet() {
@@ -384,6 +463,7 @@ function closeSheet() {
   els.sheet.hidden = true;
   document.body.classList.remove('sheet-open');
   if (tapPin) { map.removeLayer(tapPin); tapPin = null; }
+  routeLayer.clearLayers();
   fields.select(null);
   fields.relabel();
   if (wasTap && state.mode === 'drive' && state.fix) { state.following = true; els.recenter.hidden = true; follow(true); }
@@ -398,11 +478,12 @@ const pinIcon = L.divIcon({ className: 'tap-pin', iconSize: [16, 16], iconAnchor
 async function onMapTap(lat, lon) {
   if (state.mode === 'idle') enterExplore(null, true);
   const field = fields.fieldAt(lat, lon);
-  // Tapping outside any field while the sheet is open just closes it.
+  // Tapping outside any field while a panel is open just closes it.
   if (state.sheet && !field) return closeSheet();
 
   const seq = ++state.tapSeq;
-  fields.select(field ? field.id : null);
+  routeLayer.clearLayers();
+  fields.select(field ? field.id : null, [lat, lon]);
   if (tapPin) tapPin.setLatLng([lat, lon]);
   else tapPin = L.marker([lat, lon], { icon: pinIcon, interactive: false }).addTo(map);
 
@@ -414,12 +495,169 @@ async function onMapTap(lat, lon) {
     const res = await lookup(lat, lon, { tapped: true });
     if (seq !== state.tapSeq) return;
     const facts = field && field.acres > 0 ? `Field size about <b>${field.acres.toLocaleString()} acres</b>` : '';
-    showSheet('tap', detail('point', res.sides.point, res.layers, facts));
+    showSheet('tap', detail('point', res.sides.point, res.layers, { facts, lat, lon }));
   } catch (err) {
     if (seq !== state.tapSeq) return;
     showSheet('tap', `<article class="detail"><div class="lbl">This spot</div><p class="err">${esc(err.message)}. Try again in a moment.</p></article>`);
   }
 }
+
+// ---------- trip log ----------
+
+function loadTrip() {
+  try {
+    const t = JSON.parse(localStorage.getItem('fs.trip') || 'null');
+    if (t && t.m) return t;
+  } catch { /* ignore */ }
+  return { started: Date.now(), total: 0, m: {}, last: null };
+}
+function saveTrip() { localSet('fs.trip', JSON.stringify(state.trip)); }
+
+// Roadside distance past each crop: each lookup credits the distance since the last one,
+// split between the sides.
+function logTrip(res) {
+  const t = state.trip, here = { lat: res.lat, lon: res.lon };
+  if (t.last) {
+    const d = distM(t.last, here);
+    if (d < 1500) {
+      const sides = Object.values(res.sides);
+      for (const s of sides) {
+        const k = s.code ?? 'none';
+        t.m[k] = (t.m[k] || 0) + d / sides.length;
+      }
+      t.total += d;
+    }
+  }
+  t.last = here;
+  saveTrip();
+}
+
+const miles = (m) => (m / 1609.34 < 10 ? (m / 1609.34).toFixed(1) : Math.round(m / 1609.34).toLocaleString());
+
+function openTrip() {
+  const t = state.trip;
+  // Merge classes that share a display name (e.g. the developed-land intensities).
+  const byName = new Map();
+  for (const [k, m] of Object.entries(t.m)) {
+    const code = k === 'none' ? null : +k, name = code != null ? prettyName(code) : 'No data';
+    const r = byName.get(name) || { code, m: 0 };
+    r.m += m;
+    byName.set(name, r);
+  }
+  const rows = [...byName.values()].sort((a, b) => b.m - a.m);
+  const farm = rows.filter((r) => r.code != null && isAg(r.code)).reduce((s, r) => s + r.m, 0);
+  const top = rows.slice(0, 10);
+  const maxM = top[0]?.m || 1;
+  const started = new Date(t.started).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  const body = t.total < 50
+    ? '<p class="predict">Nothing logged yet. Start driving and the crops along your route add up here.</p>'
+    : `<div class="trip-sum"><div><b>${miles(t.total)}</b><span>miles driven</span></div><div><b>${Math.round(farm / t.total * 100)}%</b><span>farmland roadside</span></div></div>
+       <div class="tbars">${top.map((r) => `<div class="tbar"><span class="swatch" style="background:${r.code != null ? colorOf(r.code) : 'var(--line)'}"></span>
+         <span class="bname">${esc(r.code != null ? prettyName(r.code) : 'No data')}</span><i><b style="width:${(r.m / maxM * 100).toFixed(1)}%;background:${r.code != null ? colorOf(r.code) : 'var(--line)'}"></b></i><span class="bval">${miles(r.m)} mi</span></div>`).join('')}</div>`;
+  showSheet('trip', `<article class="detail"><div class="lbl">Trip log · since ${esc(started)}</div>
+    <div class="crop"><span class="crop-name">${t.total < 50 ? 'No miles yet' : `Mostly ${esc(rows.find((r) => r.code != null && isAg(r.code)) ? prettyName(rows.find((r) => r.code != null && isAg(r.code)).code) : 'non-farm')}`}</span></div>
+    ${body}
+    <div class="sheet-actions"><button class="ghost" data-act="newtrip">Start a new trip</button><button class="ghost" data-act="menu">Back</button></div></article>`);
+}
+
+// ---------- menu, offline routes ----------
+
+function openMenu() {
+  const routes = loadRoutes();
+  const t = state.trip;
+  showSheet('menu', `<nav class="menu">
+    <button data-act="trip"><b>Trip log</b><span>${t.total >= 50 ? `${miles(t.total)} mi so far` : 'Miles of each crop along your drive'}</span></button>
+    <button data-act="offline"><b>Save a route for offline</b><span>For stretches with no signal</span></button>
+    <button data-act="routes"><b>Saved routes</b><span>${routes.length ? `${routes.length} saved` : 'None yet'}</span></button>
+    <button data-act="about"><b>About the data</b><span>Where each reading comes from</span></button>
+  </nav>`);
+}
+els.menuBtn.addEventListener('click', () => (state.sheet === 'menu' ? closeSheet() : openMenu()));
+
+let downloadCtl = null;
+
+function openOffline() {
+  showSheet('offline', `<article class="detail"><div class="lbl">Save a route for offline</div>
+    <p class="predict">Downloads the crop maps along a route, so left/right readings keep working with no signal. The base map needs signal.</p>
+    <form class="route-form" id="routeForm">
+      <label>From<input name="from" placeholder="Current location" autocomplete="off"></label>
+      <label>To<input name="to" placeholder="City, town or address" required autocomplete="off"></label>
+      <button class="primary" type="submit">Find route</button>
+    </form>
+    <div id="routePlan"></div></article>`);
+  $('routeForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target), out = $('routePlan');
+    out.innerHTML = '<p class="predict">Finding the route…</p>';
+    try {
+      const here = state.fix ? { lat: state.fix.lat, lon: state.fix.lon } : await new Promise((r) => {
+        if (!navigator.geolocation) return r(null);
+        navigator.geolocation.getCurrentPosition((p) => r({ lat: p.coords.latitude, lon: p.coords.longitude }), () => r(null), { timeout: 8000 });
+      });
+      const plan = await planRoute(fd.get('from').trim(), fd.get('to').trim(), here);
+      routeLayer.clearLayers();
+      const line = L.polyline(plan.coords, { color: '#e8c170', weight: 4, opacity: 0.9 }).addTo(routeLayer);
+      map.fitBounds(line.getBounds(), { paddingTopLeft: [20, 90], paddingBottomRight: [20, 320] });
+      out.innerHTML = `<div class="plan"><b>${esc(plan.from.name)} → ${esc(plan.to.name)}</b>
+        <span>${Math.round(plan.miles)} mi · ${Math.floor(plan.minutes / 60)} h ${Math.round(plan.minutes % 60)} min · about ${plan.mb < 1 ? '<1' : Math.round(plan.mb)} MB</span></div>
+        <button class="primary" id="dlBtn">Download for offline</button>`;
+      $('dlBtn').addEventListener('click', async () => {
+        downloadCtl = new AbortController();
+        out.innerHTML = '<div class="dl"><i><b id="dlBar"></b></i><span id="dlText">Starting…</span><button class="chip warn" id="dlCancel">Cancel</button></div>';
+        $('dlCancel').addEventListener('click', () => downloadCtl?.abort());
+        try {
+          const rec = await downloadRoute(plan, (done, total) => {
+            const bar = $('dlBar'), txt = $('dlText');
+            if (bar) bar.style.width = `${(done / total * 100).toFixed(1)}%`;
+            if (txt) txt.textContent = `${done.toLocaleString()} of ${total.toLocaleString()} map pieces`;
+          }, downloadCtl.signal);
+          downloadCtl = null;
+          if (!out.isConnected) setStatus('Route saved for offline', 'on');
+          out.innerHTML = `<p class="note"><b>Saved.</b> Left/right readings will work along this route with no signal${rec.failed ? ` (${rec.failed} pieces couldn't be downloaded)` : ''}.</p>`;
+        } catch (err) {
+          downloadCtl = null;
+          out.innerHTML = err.name === 'AbortError' ? '<p class="predict">Cancelled. Pieces already downloaded stay saved.</p>' : `<p class="err">${esc(err.message)}</p>`;
+        }
+      });
+    } catch (err) {
+      out.innerHTML = `<p class="err">${esc(err.message)}</p>`;
+    }
+  });
+}
+
+function openRoutes() {
+  const routes = loadRoutes();
+  showSheet('routes', `<article class="detail"><div class="lbl">Saved routes</div>
+    ${routes.length ? `<div class="routes">${routes.map((r) => `<div class="route">
+      <div><b>${esc(r.name)}</b><span>${r.miles} mi · saved ${esc(new Date(r.saved).toLocaleDateString())}</span></div>
+      <button class="chip" data-act="showroute" data-id="${r.id}">Show</button>
+      <button class="chip warn" data-act="delroute" data-id="${r.id}">Delete</button></div>`).join('')}</div>`
+    : '<p class="predict">No saved routes yet.</p>'}
+    <div class="sheet-actions"><button class="ghost" data-act="offline">Save a route</button><button class="ghost" data-act="menu">Back</button></div></article>`);
+}
+
+els.sheetBody.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'trip') openTrip();
+  else if (act === 'menu') openMenu();
+  else if (act === 'offline') openOffline();
+  else if (act === 'routes') openRoutes();
+  else if (act === 'about') { closeSheet(); els.about.showModal(); }
+  else if (act === 'newtrip') { state.trip = { started: Date.now(), total: 0, m: {}, last: null }; saveTrip(); openTrip(); }
+  else if (act === 'showroute') {
+    const r = loadRoutes().find((x) => x.id === b.dataset.id);
+    if (!r) return;
+    routeLayer.clearLayers();
+    const line = L.polyline(r.line, { color: '#e8c170', weight: 4, opacity: 0.9 }).addTo(routeLayer);
+    map.fitBounds(line.getBounds(), { paddingTopLeft: [20, 90], paddingBottomRight: [20, 320] });
+  } else if (act === 'delroute') {
+    await deleteRoute(b.dataset.id);
+    routeLayer.clearLayers();
+    openRoutes();
+  }
+});
 
 // ---------- voice ----------
 
@@ -475,6 +713,7 @@ function startDriving() {
   keepAwake();
   renderStripMessage('Finding GPS…');
   setStatus('Finding GPS…', 'busy');
+  state.trip.last = null;   // don't count the gap since the last drive
 
   if (new URLSearchParams(location.search).has('sim')) return simulate();
   if (!('geolocation' in navigator)) return renderStripMessage('This browser has no GPS access', false);
@@ -523,10 +762,17 @@ function simulate() {
 }
 
 document.body.classList.add('welcoming');
+els.headBtn.setAttribute('aria-pressed', String(state.headingUp));
 els.startBtn.addEventListener('click', startDriving);
 els.exploreBtn.addEventListener('click', () => enterExplore());
-els.infoBtn.addEventListener('click', () => els.about.showModal());
 els.about.addEventListener('click', (e) => { if (e.target === els.about) els.about.close(); });
+window.addEventListener('online', () => state.mode === 'drive' && driveStatus(false));
+window.addEventListener('offline', () => state.mode === 'drive' && driveStatus(false));
+
+// ?debug exposes internals in the console.
+if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { fsMap: map, fsFields: fields, fsState: state });
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 // Shareable spot: ?at=lat,lon opens the map there and inspects it.
 const at = new URLSearchParams(location.search).get('at')?.split(',').map(Number);

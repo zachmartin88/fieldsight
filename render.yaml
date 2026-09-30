@@ -1,0 +1,19 @@
+# Render Blueprint: the FieldSight proxy (caches crop-map tiles, serves USDA crop progress).
+# In Render: New ▸ Blueprint ▸ pick this repository.
+services:
+  - type: web
+    name: fieldsight-proxy
+    runtime: node
+    plan: free               # sleeps after ~15 min idle; the app goes direct while it wakes. "starter" stays on.
+    region: ohio
+    buildCommand: "true"     # no dependencies
+    startCommand: node proxy/server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_EXTRA_CA_CERTS   # the crop-map server doesn't send its intermediate certificate
+        value: proxy/incommon-rsa-server-ca-2.pem
+      - key: NODE_VERSION
+        value: "22"
+      - key: QUICKSTATS_KEY        # free key from https://quickstats.nass.usda.gov/api (crop progress)
+        sync: false

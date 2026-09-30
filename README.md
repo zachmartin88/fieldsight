@@ -2,9 +2,10 @@
 
 See what's growing in the fields beside you as you drive, anywhere in the lower 48.
 
-Static web app (no backend, no build step). Full-screen map; tap **Start driving** and a bar across the top
-names the crop on your **left** and **right** from GPS position + heading. Tap any field on the map for a
-detail panel. Fields are drawn as outlined, labeled shapes when zoomed in (zoom 13+).
+Static web app (no build step) plus an optional small proxy. Full-screen map. Tap **Start driving** and a
+bar across the top names the crop on your **left** and **right** from GPS position + heading, with what's
+coming up ~300 m ahead. Tap any field for a detail panel. The ☰ menu has the trip log, offline routes and
+data notes.
 
 ## Data, and how each reading is labeled
 
@@ -21,22 +22,48 @@ Both are served by George Mason University CSISS WMS endpoints (CORS-enabled):
 - `https://cat.csiss.gmu.edu/cgi-bin/wms_cdlall`: layers `cdl_YYYY`, raw class codes via `FORMAT=image/tiff`
 
 Layers are discovered from GetCapabilities at startup, so new monthly/annual maps are picked up automatically.
-Note: the server doesn't send its intermediate TLS cert. Browsers cope; Node needs `NODE_EXTRA_CA_CERTS`.
+Lookups read fixed 0.01° tiles (~1 km, 10 m pixels), so consecutive lookups reuse loaded tiles and identical
+URLs can be cached by the proxy and the offline cache.
+
+## Proxy (optional, `proxy/server.js`)
+
+Caches tiles (the upstream server has been flaky) and serves weekly USDA crop progress/condition for the
+state you're in. Deploy on Render: **New ▸ Blueprint ▸ this repo** (`render.yaml`), then:
+
+1. Set `QUICKSTATS_KEY` in Render (free key: https://quickstats.nass.usda.gov/api) to turn on crop progress.
+2. Put the service URL in `config.js` (`proxy: 'https://…onrender.com'`) and push.
+
+The free plan sleeps when idle; the app goes direct to the map server while it wakes. Without a proxy
+configured, everything except crop progress works.
+
+The upstream server doesn't send its intermediate TLS cert. Browsers cope; Node needs
+`NODE_EXTRA_CA_CERTS=proxy/incommon-rsa-server-ca-2.pem` (set in `render.yaml`).
+
+## Offline
+
+`sw.js` caches the app and every lookup tile it sees. **☰ ▸ Save a route for offline** geocodes the ends
+(OpenStreetMap Nominatim), routes (OSRM), and downloads the live map + last 3 annual maps for a corridor
+along the road (up to 400 miles). Left/right readings then work with no signal; the base map needs signal.
 
 ## Run locally
 
 ```bash
-python3 -m http.server 5178 -d ~/fieldsight
+python3 ~/fieldsight/tools/devserver.py 5178
 ```
+
+(No-cache static server so edits always load.) Proxy: `NODE_EXTRA_CA_CERTS=proxy/incommon-rsa-server-ca-2.pem node proxy/server.js`.
 
 - `?sim=1` simulates a drive through central Iowa (no GPS needed)
 - `?at=42.05,-93.75` opens and inspects a specific spot (shareable)
+- `?debug` exposes `fsMap`, `fsFields`, `fsState` in the console
 
 GPS needs HTTPS (or localhost).
 
 ## Files
 
-- `data.js`: layer discovery, TIFF reader, point/strip sampling, voting, rotation prediction, tiers
-- `fields.js`: field overlay (view image → despeckle → connected fields → outlines + labels, hit-testing)
-- `app.js`: map, GPS/heading, drive strip, detail sheet, voice, wake lock
-- `cdl-classes.js`: CDL class codes → names/colors
+- `data.js`: layer discovery, proxy/direct fetching, tile grid, TIFF reader, sampling, voting, rotation prediction, tiers
+- `fields.js`: field overlay (view image → despeckle → connected fields → smoothed outlines + labels, hit-testing)
+- `app.js`: map (heading-up), GPS, drive strip, detail sheet, crop progress, trip log, menu, voice
+- `offline.js`: route planning and offline downloads; `sw.js`: service worker
+- `cdl-classes.js`: CDL class codes → names/colors; `config.js`: proxy URL
+- `proxy/`: caching proxy + USDA crop progress; `render.yaml`: Render blueprint
