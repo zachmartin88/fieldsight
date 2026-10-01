@@ -1,8 +1,9 @@
 import {
-  lookup, discoverLayers, prettyName, colorOf, isAg, NOTES, sideArea, LIVE_WMS, ANNUAL_WMS,
+  lookup, discoverLayers, prettyName, isAg, NOTES, sideArea, LIVE_WMS, ANNUAL_WMS,
   wakeProxy, proxyUrl,
 } from './data.js';
-import { FieldLayer, FIELD_MIN_ZOOM } from './fields.js';
+import { FieldLayer, CropTiles, FIELD_MIN_ZOOM } from './fields.js';
+import { cropColor, cropEmoji, shortName, TYPICAL_YIELD } from './palette.js';
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
 
 const $ = (id) => document.getElementById(id);
@@ -10,7 +11,7 @@ const els = {
   status: $('status'), statusText: $('statusText'), strip: $('strip'), welcome: $('welcome'),
   startBtn: $('startBtn'), exploreBtn: $('exploreBtn'), voiceBtn: $('voiceBtn'), menuBtn: $('menuBtn'),
   about: $('about'), recenter: $('recenterBtn'), layerToggle: $('layerToggle'), baseBtn: $('baseBtn'),
-  headBtn: $('headBtn'), mapHint: $('mapHint'), sheet: $('sheet'), sheetBody: $('sheetBody'), sheetClose: $('sheetClose'),
+  headBtn: $('headBtn'), legend: $('legend'), mapHint: $('mapHint'), sheet: $('sheet'), sheetBody: $('sheetBody'), sheetClose: $('sheetClose'),
 };
 
 const state = {
@@ -29,6 +30,7 @@ const state = {
   lastSpoken: {},
   voice: localGet('fs.voice') === '1',
   layers: null,
+  focus: null,           // crop code spotlighted from the legend
   trip: loadTrip(),
 };
 
@@ -64,30 +66,37 @@ const BASES = {
   ],
 };
 let base = localGet('fs.base') === 'satellite' ? 'satellite' : 'dark';
+let fields = null;   // the field layer (created below; setBase runs first)
 function setBase(which) {
   base = which;
   localSet('fs.base', which);
   for (const [k, layers] of Object.entries(BASES)) for (const l of layers) (k === which ? l.addTo(map) : map.removeLayer(l));
   els.baseBtn.setAttribute('aria-pressed', String(which === 'satellite'));
   els.baseBtn.title = which === 'satellite' ? 'Switch to dark map' : 'Switch to satellite';
+  fields?.setSolid(which === 'dark');
 }
 setBase(base);
 els.baseBtn.addEventListener('click', () => setBase(base === 'dark' ? 'satellite' : 'dark'));
 map.attributionControl.addAttribution('Crops: USDA NASS, GMU CSISS');
 
 // Crops: pixel tiles when zoomed out, outlined + labeled fields when zoomed in.
-const fields = new FieldLayer(map, {
+fields = new FieldLayer(map, {
   pane: 'fields', labelPane: 'markerPane',
-  onLoading: (on) => { if (state.mode !== 'drive') setStatus(on ? 'Loading fields…' : 'Ready', on ? 'busy' : ''); },
+  onLoading: (on) => {
+    document.body.classList.toggle('loading', on);
+    if (state.mode !== 'drive') setStatus(on ? 'Loading fields…' : 'Ready', on ? 'busy' : '');
+  },
+  onStats: (stats) => renderLegend(stats),
   // Keep labels out from under the top bar and a bottom panel.
   insets: () => {
     const top = document.querySelector('.hud').getBoundingClientRect().bottom;
-    const panels = [els.sheet, els.welcome].filter((e) => !e.hidden).map((e) => e.getBoundingClientRect())
-      .filter((r) => r.width > window.innerWidth * 0.9);
-    // With no panel open, leave room for the map buttons along the bottom.
-    return { top, bottom: panels.length ? window.innerHeight - Math.min(...panels.map((r) => r.top)) : 76 };
+    const panels = [els.sheet, els.welcome, els.legend].filter((e) => !e.hidden && e.offsetParent)
+      .map((e) => e.getBoundingClientRect()).filter((r) => r.width > window.innerWidth * 0.9);
+    // Always leave room for the map buttons along the bottom.
+    return { top, bottom: Math.max(76, ...panels.map((r) => window.innerHeight - r.top)) };
   },
 });
+fields.setSolid(base === 'dark');
 const crop = { which: localGet('fs.layer') || 'live', tiles: null };
 
 function cropSource(which) {
@@ -104,10 +113,7 @@ function setCrop(which) {
   const src = cropSource(which);
   if (crop.tiles) { map.removeLayer(crop.tiles); crop.tiles = null; }
   if (src) {
-    crop.tiles = L.tileLayer.wms(src.url, {
-      layers: src.layer, format: 'image/png', transparent: true, version: '1.1.1',
-      crs: L.CRS.EPSG4326, opacity: 0.55, tileSize: 512, pane: 'fields',
-    });
+    crop.tiles = new CropTiles({ source: src, pane: 'fields', opacity: 0.9 });
     fields.setSource(src);
   }
   fields.setEnabled(!!src);
@@ -118,7 +124,34 @@ function syncCropZoom() {
   const zoomedOut = map.getZoom() < FIELD_MIN_ZOOM;
   if (crop.tiles) (zoomedOut ? crop.tiles.addTo(map) : map.removeLayer(crop.tiles));
   els.mapHint.hidden = !(zoomedOut && crop.which !== 'none');
+  if (zoomedOut) renderLegend(null);
 }
+
+// ---------- "in view" legend: crops on screen; tap one to spotlight it ----------
+
+function renderLegend(stats) {
+  if (!stats || !stats.length || crop.which === 'none') {
+    els.legend.hidden = true;
+    if (state.focus != null) { state.focus = null; fields.setFocus(null); }
+    return;
+  }
+  const total = stats.reduce((t, r) => t + r.acres, 0);
+  const top = stats.filter((r) => r.acres / total >= 0.01).slice(0, 8);
+  if (state.focus != null && !top.some((r) => r.code === state.focus)) top.push({ code: state.focus, acres: 0 });
+  const appeared = els.legend.hidden;
+  els.legend.hidden = false;
+  // Labels were placed before the legend showed up; place them again clear of it.
+  if (appeared) requestAnimationFrame(() => fields.relabel());
+  els.legend.innerHTML = top.map((r) => `<button data-code="${r.code}" class="${r.code === state.focus ? 'on' : ''}" style="--c:${cropColor(r.code)}">
+      <span class="emo">${cropEmoji(r.code)}</span>${esc(prettyName(r.code))}<em>${r.acres ? `${Math.max(1, Math.round(r.acres / total * 100))}%` : ''}</em></button>`).join('');
+}
+els.legend.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const code = +b.dataset.code;
+  state.focus = state.focus === code ? null : code;
+  fields.setFocus(state.focus);
+});
 map.on('zoomend', syncCropZoom);
 els.layerToggle.addEventListener('click', (e) => {
   const b = e.target.closest('button');
@@ -315,10 +348,10 @@ function renderStrip(res) {
     // "Then …": the crop ~300 m ahead on this side, when it changes.
     const a = res.ahead?.[k];
     const then = a && a.code != null && a.code !== s.code && isAg(a.code)
-      ? `<div class="then">then <span class="swatch" style="background:${colorOf(a.code)}"></span>${esc(prettyName(a.code))}</div>` : '';
+      ? `<div class="then">then ${cropEmoji(a.code)} ${esc(prettyName(a.code))}</div>` : '';
     return `<div class="side-cell tier-${s.tier}">
       <div class="lbl"><span>${label}</span>${tierTag(s, res.layers)}</div>
-      <div class="name"><span class="swatch" style="background:${s.code != null ? colorOf(s.code) : 'var(--line)'}"></span><span>${esc(name)}</span></div>
+      <div class="name"><span class="chipdot" style="--c:${cropColor(s.code)}">${cropEmoji(s.code) || '·'}</span><span>${esc(name)}</span></div>
       ${then}
     </div>`;
   }).join('');
@@ -381,7 +414,17 @@ async function fillProgress() {
 
 // ---------- detail sheet ----------
 
-function detail(sideKey, s, layers, { facts = '', lat, lon } = {}) {
+// "Corn ↔ Soybeans rotation", "Alfalfa every year", ...
+function rotationSummary(history) {
+  const c = history.map((h) => h.code).filter((x) => x != null);
+  if (c.length < 2) return '';
+  const kinds = [...new Set(c)];
+  if (kinds.length === 1) return `${prettyName(kinds[0])} every year`;
+  if (kinds.length === 2 && c.every((v, i) => i === 0 || v !== c[i - 1])) return `${prettyName(c.at(-1))} ↔ ${prettyName(c.at(-2))} rotation`;
+  return `${kinds.length} different crops in ${c.length} years`;
+}
+
+function detail(sideKey, s, layers, { stats = [], lat, lon } = {}) {
   const liveLabel = layers.live?.label;
   const outside = s.code == null && !s.live && s.history.every((h) => h.code == null);
   const name = s.code != null ? prettyName(s.code) : outside ? 'Not mapped' : 'No data here';
@@ -422,19 +465,29 @@ function detail(sideKey, s, layers, { facts = '', lat, lon } = {}) {
   const runner = s.tier === 'live-mixed' && s.live?.runner && s.live.runner.share > 0.15
     ? `<div class="runner">and <b>${esc(prettyName(s.live.runner.code))}</b></div>` : '';
   const note = NOTES[s.code] && s.tier !== 'live-cover' ? `<p class="note">${esc(NOTES[s.code])}</p>` : '';
-  const factsHtml = facts ? `<div class="facts">${facts}</div>` : '';
+  const factsHtml = stats.length ? `<div class="stats">${stats.map(([v, l]) => `<div><b>${v}</b><span>${l}</span></div>`).join('')}</div>` : '';
 
+  // Crop history: one tile per season, this season last (live reading, or the prediction).
   const nowYear = layers.live?.year ?? (layers.years[0] + 1);
-  const cells = s.history.map((h) => `<div class="yr" title="${h.year}: ${h.code != null ? esc(prettyName(h.code)) : 'no data'}"><i style="background:${h.code != null ? colorOf(h.code) : 'var(--line)'}"></i>${String(h.year).slice(2)}</div>`);
-  cells.push(`<div class="yr now" title="${nowYear}: ${esc(name)}"><i style="background:${s.live ? colorOf(s.live.code) : 'transparent'};${s.live ? '' : 'border:1px dashed var(--muted)'}"></i>${String(nowYear).slice(2)}</div>`);
+  const nowCode = s.live ? s.live.code : s.prediction?.code ?? null;
+  const seasons = [
+    ...s.history.map((h) => ({ year: h.year, code: h.code, kind: '' })),
+    { year: nowYear, code: nowCode, kind: s.live ? 'now live' : 'now guess' },
+  ];
+  const tiles = seasons.map((x) => `<div class="season ${x.kind}" style="--c:${cropColor(x.code)}" title="${x.year}: ${x.code != null ? esc(prettyName(x.code)) : 'no data'}">
+      <span class="yr">${x.kind ? (s.live ? 'Now' : 'Next?') : `’${String(x.year).slice(2)}`}</span>
+      <b>${x.code != null ? cropEmoji(x.code) || '•' : '–'}</b>
+      <span class="nm">${x.code != null ? esc(shortName(x.code)) : 'No data'}</span></div>`).join('');
+  const rot = rotationSummary(s.history);
 
   return `<article class="detail">
       <div class="lbl">${SIDE_NAME[sideKey]}</div>
-      <div class="crop"><span class="swatch" style="background:${s.code != null ? colorOf(s.code) : 'var(--line)'}"></span><span class="crop-name">${esc(name)}</span></div>
+      <div class="crop"><span class="big-emo" style="--c:${cropColor(s.code)}">${s.code != null ? cropEmoji(s.code) || '•' : '?'}</span><span class="crop-name">${esc(name)}</span></div>
       ${runner}
       <div class="badges">${badges.join('')}</div>
       ${factsHtml}${extra}${note}
-      <div class="history" style="--n:${cells.length}">${cells.join('')}</div>
+      <div class="seasons-head"><span>Crop history</span>${rot ? `<span>${esc(rot)}</span>` : ''}</div>
+      <div class="seasons">${tiles}</div>
       ${lat != null && s.code != null ? progressSlot(lat, lon, s.code) : ''}
     </article>`;
 }
@@ -488,18 +541,32 @@ async function onMapTap(lat, lon) {
   else tapPin = L.marker([lat, lon], { icon: pinIcon, interactive: false }).addTo(map);
 
   showSheet('tap', `<article class="detail"><div class="lbl">This spot</div>
-    <div class="crop"><span class="swatch" style="background:${field ? colorOf(field.code) : 'var(--line)'}"></span>
+    <div class="crop"><span class="big-emo" style="--c:${cropColor(field?.code)}">${field ? cropEmoji(field.code) : '…'}</span>
     <span class="crop-name loading-name">${field ? esc(prettyName(field.code)) : 'Looking…'}</span></div></article>`);
 
   try {
     const res = await lookup(lat, lon, { tapped: true });
     if (seq !== state.tapSeq) return;
-    const facts = field && field.acres > 0 ? `Field size about <b>${field.acres.toLocaleString()} acres</b>` : '';
-    showSheet('tap', detail('point', res.sides.point, res.layers, { facts, lat, lon }));
+    showSheet('tap', detail('point', res.sides.point, res.layers, { stats: fieldStats(field, res.sides.point), lat, lon }));
   } catch (err) {
     if (seq !== state.tapSeq) return;
     showSheet('tap', `<article class="detail"><div class="lbl">This spot</div><p class="err">${esc(err.message)}. Try again in a moment.</p></article>`);
   }
+}
+
+// The numbers callout for a tapped field: size, and a rough "what's in it" at a typical yield.
+function fieldStats(field, s) {
+  if (!field) return [];
+  const out = [[field.acres.toLocaleString(), field.acres === 1 ? 'acre' : 'acres']];
+  // An American football field with end zones is about 1.32 acres.
+  out.push([`≈${Math.max(1, Math.round(field.acres / 1.32)).toLocaleString()}`, 'football fields']);
+  const y = TYPICAL_YIELD[s.code];
+  if (y && isAg(s.code)) {
+    const total = y[0] * field.acres;
+    const v = total >= 1e6 ? `${(total / 1e6).toFixed(1)}M` : total >= 1e4 ? `${Math.round(total / 1e3)}k` : Math.round(total).toLocaleString();
+    out.push([`≈${v}`, `${y[1]} at a typical yield`]);
+  }
+  return out;
 }
 
 // ---------- trip log ----------
@@ -534,12 +601,21 @@ function logTrip(res) {
 
 const miles = (m) => (m / 1609.34 < 10 ? (m / 1609.34).toFixed(1) : Math.round(m / 1609.34).toLocaleString());
 
+// Crop bingo: every different crop seen along the way.
+function spotted(rows) {
+  const crops = rows.filter((r) => r.code != null && isAg(r.code));
+  if (!crops.length) return '';
+  return `<div class="spotted-head"><span>Crops spotted</span><span>${crops.length} so far</span></div>
+    <div class="spotted">${crops.map((r) => `<span style="--c:${cropColor(r.code)}" title="${esc(prettyName(r.code))}">${cropEmoji(r.code)}<i>${esc(prettyName(r.code))}</i></span>`).join('')}</div>`;
+}
+
 function openTrip() {
   const t = state.trip;
   // Merge classes that share a display name (e.g. the developed-land intensities).
   const byName = new Map();
   for (const [k, m] of Object.entries(t.m)) {
-    const code = k === 'none' ? null : +k, name = code != null ? prettyName(code) : 'No data';
+    const code = k === 'none' ? null : +k;
+    const name = code == null ? 'No data' : isAg(code) ? prettyName(code) : shortName(code);
     const r = byName.get(name) || { code, m: 0 };
     r.m += m;
     byName.set(name, r);
@@ -552,11 +628,12 @@ function openTrip() {
   const body = t.total < 50
     ? '<p class="predict">Nothing logged yet. Start driving and the crops along your route add up here.</p>'
     : `<div class="trip-sum"><div><b>${miles(t.total)}</b><span>miles driven</span></div><div><b>${Math.round(farm / t.total * 100)}%</b><span>farmland roadside</span></div></div>
-       <div class="tbars">${top.map((r) => `<div class="tbar"><span class="swatch" style="background:${r.code != null ? colorOf(r.code) : 'var(--line)'}"></span>
-         <span class="bname">${esc(r.code != null ? prettyName(r.code) : 'No data')}</span><i><b style="width:${(r.m / maxM * 100).toFixed(1)}%;background:${r.code != null ? colorOf(r.code) : 'var(--line)'}"></b></i><span class="bval">${miles(r.m)} mi</span></div>`).join('')}</div>`;
+       <div class="tbars">${top.map((r) => `<div class="tbar"><span class="swatch" style="background:${r.code != null ? cropColor(r.code) : 'var(--line)'}"></span>
+         <span class="bname">${esc(r.code != null ? prettyName(r.code) : 'No data')}</span><i><b style="width:${(r.m / maxM * 100).toFixed(1)}%;background:${r.code != null ? cropColor(r.code) : 'var(--line)'}"></b></i><span class="bval">${miles(r.m)} mi</span></div>`).join('')}</div>`;
   showSheet('trip', `<article class="detail"><div class="lbl">Trip log · since ${esc(started)}</div>
     <div class="crop"><span class="crop-name">${t.total < 50 ? 'No miles yet' : `Mostly ${esc(rows.find((r) => r.code != null && isAg(r.code)) ? prettyName(rows.find((r) => r.code != null && isAg(r.code)).code) : 'non-farm')}`}</span></div>
     ${body}
+    ${spotted(rows)}
     <div class="sheet-actions"><button class="ghost" data-act="newtrip">Start a new trip</button><button class="ghost" data-act="menu">Back</button></div></article>`);
 }
 

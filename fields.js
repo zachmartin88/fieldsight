@@ -1,45 +1,142 @@
-// Field overlay: fetches the crop map for the current view as one image, cleans up speckle,
-// groups pixels into fields (connected areas of one crop), traces each field's outline into a
-// smooth shape, and draws it tinted and outlined with a name label. Replaces the raw pixel
-// tiles when zoomed in.
-import { rgbToCode, isAg, prettyName, colorOf, wmsFetch } from './data.js';
+// The crop map layers.
+//
+// FieldLayer (zoomed in): fetches the crop map for the view as one image, cleans up speckle, groups
+// pixels into fields (connected areas of one crop), traces each field's outline into a smooth shape,
+// and draws every field as its own vector polygon, so fields stay crisp while zooming and can be
+// hovered, tapped, highlighted, and filtered by crop.
+//
+// CropTiles (zoomed out): the same map as tiles, recolored into FieldSight's palette so colors match
+// at every zoom.
+import { rgbToCode, isAg, prettyName, wmsFetch } from './data.js';
+import { cropColor, cropEmoji, cropLabel } from './palette.js';
 
-export const FIELD_MIN_ZOOM = 13;
+export const FIELD_MIN_ZOOM = 12;
 const METERS_PER_PX = 7;   // request resolution; source data is 10-30 m
 const MAX_PX = 900;
-const MAX_CANVAS = 4096;
+const MIN_FIELD_PX = 5;    // ignore specks smaller than this (about a quarter acre)
 
-// An image overlay whose "image" is a canvas we draw on (avoids encoding big PNGs).
-const CanvasOverlay = L.ImageOverlay.extend({
-  _initImage() {
-    const c = this._image = this._url;
-    L.DomUtil.addClass(c, 'leaflet-image-layer');
-    if (this._zoomAnimated) L.DomUtil.addClass(c, 'leaflet-zoom-animated');
-    if (this.options.className) L.DomUtil.addClass(c, this.options.className);
-    c.onselectstart = L.Util.falseFn;
-    c.onmousemove = L.Util.falseFn;
+// ---------- color helpers ----------
+
+export function parseColor(c) {
+  if (c.startsWith('#')) return [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+  const m = c.match(/hsl\((\d+),\s*(\d+)%,\s*(\d+)%\)/);
+  if (!m) return [128, 128, 128];
+  const h = +m[1] / 360, s = +m[2] / 100, l = +m[3] / 100;
+  const f = (n) => {
+    const k = (n + h * 12) % 12, a = s * Math.min(l, 1 - l);
+    return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+  };
+  return [f(0), f(8), f(4)];
+}
+const shade = (c, t) => `rgb(${parseColor(c).map((v) => Math.round(v * (1 - t))).join(',')})`;
+
+// ---------- zoomed-out tiles ----------
+
+export const CropTiles = L.GridLayer.extend({
+  options: { tileSize: 512, opacity: 0.9, source: null, updateWhenZooming: false, keepBuffer: 1 },
+
+  createTile(coords, done) {
+    const size = this.getTileSize(), tile = document.createElement('canvas');
+    tile.width = size.x; tile.height = size.y;
+    const src = this.options.source;
+    const b = this._tileCoordsToBounds(coords);
+    const north = b.getNorth(), south = b.getSouth();
+    const q = `SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=${src.layer}&STYLES=&SRS=EPSG:4326` +
+      `&BBOX=${b.getWest().toFixed(6)},${south.toFixed(6)},${b.getEast().toFixed(6)},${north.toFixed(6)}` +
+      `&WIDTH=${size.x}&HEIGHT=${size.y}&FORMAT=image/png`;
+    wmsFetch(src.url, q, 20000)
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+      .then((blob) => createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' }))
+      .then((bmp) => {
+        const tmp = document.createElement('canvas');
+        tmp.width = size.x; tmp.height = size.y;
+        const tctx = tmp.getContext('2d', { willReadFrequently: true });
+        tctx.drawImage(bmp, 0, 0);
+        const inp = tctx.getImageData(0, 0, size.x, size.y).data;
+        const out = new ImageData(size.x, size.y);
+        // The server draws in lat/lon; the map is Web Mercator. Re-sample each row so they line up.
+        const map = this._map, z = coords.z;
+        for (let y = 0; y < size.y; y++) {
+          const lat = map.unproject([coords.x * size.x, coords.y * size.y + y + 0.5], z).lat;
+          const sy = Math.min(size.y - 1, Math.max(0, Math.floor((north - lat) / (north - south) * size.y)));
+          for (let x = 0; x < size.x; x++) {
+            const i = (sy * size.x + x) * 4, o = (y * size.x + x) * 4;
+            const rgba = recolor(inp[i], inp[i + 1], inp[i + 2], inp[i + 3]);
+            out.data[o] = rgba[0]; out.data[o + 1] = rgba[1]; out.data[o + 2] = rgba[2]; out.data[o + 3] = rgba[3];
+          }
+        }
+        tile.getContext('2d').putImageData(out, 0, 0);
+        done(null, tile);
+      })
+      .catch((e) => done(e, tile));
+    return tile;
   },
 });
 
+const recolorCache = new Map();
+const CLEAR = [0, 0, 0, 0];
+function recolor(r, g, b, a) {
+  if (a < 10) return CLEAR;
+  const k = (r << 16) | (g << 8) | b;
+  let v = recolorCache.get(k);
+  if (!v) {
+    const code = rgbToCode(r, g, b);
+    v = code != null && isAg(code) ? [...parseColor(cropColor(code)), code === 176 || code === 171 ? 110 : 225] : CLEAR;
+    recolorCache.set(k, v);
+  }
+  return v;
+}
+
+// ---------- zoomed-in fields ----------
+
 export class FieldLayer {
-  constructor(map, { onLoading, insets, pane = 'overlayPane', labelPane = 'markerPane' } = {}) {
+  constructor(map, { onLoading, insets, onStats, pane = 'overlayPane', labelPane = 'markerPane' } = {}) {
     this.map = map;
-    this.pane = pane;
     this.labelPane = labelPane;
     this.insets = insets || (() => ({ top: 0, bottom: 0 }));
     this.onLoading = onLoading || (() => {});
-    this.source = null;        // { url, layer }
-    this.grid = null;          // last decoded view
-    this.selected = null;      // field id
-    this.overlay = null;
+    this.onStats = onStats || (() => {});
+    this.renderer = L.canvas({ pane, padding: 0.4, tolerance: 2 });
+    this.group = L.layerGroup().addTo(map);
     this.labels = L.layerGroup().addTo(map);
+    this.polys = [];
+    this.source = null;
+    this.grid = null;
+    this.selected = null;
+    this.hovered = null;
+    this.focus = null;      // crop code to highlight; others are dimmed
+    this.solid = false;     // more opaque fills on the dark map, so colors stay bright
     this.enabled = true;
     this.req = 0;
+    this.tooltip = L.tooltip({ className: 'field-tip', direction: 'top', offset: [0, -12], opacity: 1 });
+
     let t;
-    map.on('moveend zoomend', () => { clearTimeout(t); t = setTimeout(() => this.refresh(), 200); });
+    map.on('moveend', () => { clearTimeout(t); t = setTimeout(() => this.refresh(), 150); });
+    // Hover (mouse only): light the field up and name it.
+    map.on('mousemove', (e) => {
+      if (e.originalEvent?.pointerType === 'touch') return;
+      const id = this.hitIndex(e.latlng.lat, e.latlng.lng);
+      if (id !== this.hovered) {
+        const prev = this.hovered;
+        this.hovered = id;
+        if (prev != null) this.restyle(prev);
+        if (id != null) this.restyle(id);
+        map.getContainer().style.cursor = id != null ? 'pointer' : '';
+      }
+      if (id != null) {
+        const f = this.fieldAt(e.latlng.lat, e.latlng.lng);
+        this.tooltip.setLatLng(e.latlng).setContent(`${cropLabel(f.code)} · ${f.acres.toLocaleString()} ac`);
+        if (!map.hasLayer(this.tooltip)) this.tooltip.addTo(map);
+      } else if (map.hasLayer(this.tooltip)) map.removeLayer(this.tooltip);
+    });
+    map.on('mouseout', () => {
+      if (map.hasLayer(this.tooltip)) map.removeLayer(this.tooltip);
+      const prev = this.hovered;
+      this.hovered = null;
+      if (prev != null) this.restyle(prev);
+    });
   }
 
-  // Re-place labels, e.g. when a panel opens over the map or the map rotates.
   relabel() { this.placeLabels(); }
 
   setSource(source) {
@@ -54,29 +151,41 @@ export class FieldLayer {
     if (!on) this.clear(); else this.refresh(true);
   }
 
-  clear() {
-    if (this.overlay) { this.map.removeLayer(this.overlay); this.overlay = null; }
-    this.labels.clearLayers();
-    this.grid = null;
+  setSolid(on) {
+    this.solid = on;
+    this.polys.forEach((p, id) => p && this.restyle(id));
   }
 
-  // Refetch only when the view leaves the area we already have or the zoom changes.
+  setFocus(code) {
+    this.focus = code;
+    this.polys.forEach((p, id) => p && this.restyle(id));
+    this.placeLabels();
+  }
+
+  clear() {
+    this.group.clearLayers();
+    this.labels.clearLayers();
+    this.polys = [];
+    this.grid = null;
+    this.onStats(null);
+  }
+
   needsFetch() {
     const g = this.grid, z = this.map.getZoom();
     if (!g) return true;
-    if (Math.abs(g.zoom - z) >= 1) return true;
+    if (z - g.zoom >= 1 || g.zoom - z >= 1.5) return true;   // sharper when zooming in; coarser is fine for a bit
     const b = this.map.getBounds();
     return !(b.getWest() >= g.minx && b.getEast() <= g.maxx && b.getSouth() >= g.miny && b.getNorth() <= g.maxy);
   }
 
   async refresh(force = false) {
     if (!this.enabled || !this.source || this.map.getZoom() < FIELD_MIN_ZOOM) {
-      if (this.overlay || this.labels.getLayers().length) this.clear();
+      if (this.grid) this.clear();
       return;
     }
     if (!force && !this.needsFetch()) { this.placeLabels(); return; }
 
-    const b = this.map.getBounds().pad(0.35);
+    const b = this.map.getBounds().pad(0.4);
     const minx = b.getWest(), maxx = b.getEast(), miny = b.getSouth(), maxy = b.getNorth();
     const midLat = (miny + maxy) / 2;
     const wM = (maxx - minx) * 111320 * Math.cos(midLat * Math.PI / 180), hM = (maxy - miny) * 111320;
@@ -101,7 +210,7 @@ export class FieldLayer {
       const codes = new Uint8Array(W * H);
       for (let i = 0; i < W * H; i++) {
         const c = rgbToCode(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
-        codes[i] = c != null && isAg(c) ? c : 0;   // only farmland is drawn
+        codes[i] = c != null && isAg(c) ? c : 0;   // only farmland becomes fields
       }
       despeckle(codes, W, H);
       const { comp, comps } = components(codes, W, H);
@@ -110,80 +219,69 @@ export class FieldLayer {
 
       const prev = this.selected != null && this.grid ? this.grid.selPoint : null;
       this.grid = { minx, maxx, miny, maxy, W, H, codes, comp, comps, depth, zoom: this.map.getZoom() };
-      // Keep the selection when the view is refetched.
+      this.hovered = null;
+      this.build();
+      // Keep the selection across refetches.
       this.selected = prev ? this.hitIndex(prev[0], prev[1]) : null;
-      this.draw();
+      if (this.selected != null) { this.grid.selPoint = prev; this.restyle(this.selected); }
+      this.placeLabels();
     } catch {
-      /* keep whatever is shown; next move retries */
+      /* keep what's shown; the next move retries */
     } finally {
       if (id === this.req) this.onLoading(false);
     }
   }
 
-  draw() {
+  // One polygon per field, swapped in all at once so the map never flashes empty.
+  build() {
     const g = this.grid;
-    if (!g) return;
-    // Size the canvas to roughly the screen resolution it will be shown at.
-    const a = this.map.latLngToContainerPoint([g.maxy, g.minx]), b = this.map.latLngToContainerPoint([g.miny, g.maxx]);
-    const screenW = Math.hypot(b.x - a.x, b.y - a.y) || g.W;
-    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    const k = Math.max(1, Math.min(8, (screenW / g.W) * dpr * 0.75, MAX_CANVAS / g.W, MAX_CANVAS / g.H));
-    const cv = document.createElement('canvas');
-    cv.width = Math.round(g.W * k); cv.height = Math.round(g.H * k);
-    const ctx = cv.getContext('2d');
-    ctx.scale(k, k);
-    ctx.lineJoin = 'round';
-
-    const pathOf = (c) => {
-      const p = new Path2D();
-      for (const loop of c.loops) {
-        p.moveTo(loop[0], loop[1]);
-        for (let i = 2; i < loop.length; i += 2) p.lineTo(loop[i], loop[i + 1]);
-        p.closePath();
-      }
-      return p;
-    };
+    const toLL = (x, y) => [g.maxy - y / g.H * (g.maxy - g.miny), g.minx + x / g.W * (g.maxx - g.minx)];
+    const polys = [];
+    const group = L.layerGroup();
+    this.polys = polys;
     g.comps.forEach((c, id) => {
-      if (!c.loops.length) return;
-      const p = pathOf(c), col = colorOf(c.code), dark = luminance(col) < 0.3;
-      ctx.globalAlpha = id === this.selected ? 0.55 : dark ? 0.42 : 0.34;
-      ctx.fillStyle = col;
-      ctx.fill(p, 'evenodd');
-      // Thin dark edge under a colored line, so outlines read on both the dark map and
-      // satellite; dark crop colors (soybeans, forest greens) get a lighter line.
-      ctx.globalAlpha = 0.55;
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 3.2 / k * dpr;
-      ctx.stroke(p);
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = dark ? mix(col, '#ffffff', 0.45) : col;
-      ctx.lineWidth = 1.7 / k * dpr;
-      ctx.stroke(p);
+      if (c.count < MIN_FIELD_PX || !c.loops.length) return;
+      const rings = c.loops.map((loop) => {
+        const ring = [];
+        for (let i = 0; i < loop.length; i += 2) ring.push(toLL(loop[i], loop[i + 1]));
+        return ring;
+      });
+      const p = L.polygon(rings, { renderer: this.renderer, interactive: false, smoothFactor: 0.6, ...this.styleFor(id, c) });
+      polys[id] = p;
+      group.addLayer(p);
     });
-    if (this.selected != null && g.comps[this.selected]) {
-      const p = pathOf(g.comps[this.selected]);
-      ctx.globalAlpha = 1;
-      ctx.shadowColor = 'rgba(0,0,0,.7)'; ctx.shadowBlur = 6 * dpr;
-      ctx.strokeStyle = '#e8c170';
-      ctx.lineWidth = 3.5 / k * dpr;
-      ctx.stroke(p);
-    }
-
-    const bounds = L.latLngBounds([[g.miny, g.minx], [g.maxy, g.maxx]]);
-    const old = this.overlay;
-    this.overlay = new CanvasOverlay(cv, bounds, { pane: this.pane, interactive: false, className: 'field-canvas' }).addTo(this.map);
-    if (old) this.map.removeLayer(old);
-    this.placeLabels();
+    this.map.removeLayer(this.group);
+    this.group = group.addTo(this.map);
   }
 
-  // Name labels on the biggest visible fields, each at the point deepest inside the field's
-  // visible part, skipping any that would overlap or run under the HUD / panels.
+  styleFor(id, c = this.grid.comps[id]) {
+    const col = cropColor(c.code);
+    const sel = id === this.selected, hov = id === this.hovered;
+    const dim = this.focus != null && c.code !== this.focus && !sel;
+    const grassy = c.code === 176 || c.code === 171;
+    return {
+      fillColor: col,
+      fillOpacity: dim ? 0.06 : sel ? 0.92 : hov ? 0.88 : grassy ? (this.solid ? 0.42 : 0.3) : this.solid ? 0.82 : 0.62,
+      color: sel || hov ? '#ffffff' : shade(col, 0.55),
+      weight: sel ? 3.5 : hov ? 2.5 : 1.3,
+      opacity: dim ? 0.2 : 1,
+    };
+  }
+
+  restyle(id) {
+    const p = this.polys[id];
+    if (!p || !this.grid) return;
+    p.setStyle(this.styleFor(id));
+    if (id === this.selected || id === this.hovered) p.bringToFront();
+  }
+
+  // Labels on the biggest visible fields (each at the deepest point of the uncovered part of the
+  // field), plus the acreage of each crop in view for the legend.
   placeLabels() {
     const g = this.grid;
     this.labels.clearLayers();
     if (!g) return;
     const map = this.map, size = map.getSize(), inset = this.insets();
-    // The part of the map not covered by the HUD or a panel (its bounding box if the map is rotated).
     const corners = [[0, inset.top], [size.x, inset.top], [0, size.y - inset.bottom], [size.x, size.y - inset.bottom]]
       .map(([x, y]) => map.containerPointToLatLng([x, y]));
     const lats = corners.map((c) => c.lat), lngs = corners.map((c) => c.lng);
@@ -200,10 +298,23 @@ export class FieldLayer {
       const dd = Math.min(g.depth[i], x - x0, x1 - x, y - y0, y1 - y);
       if (dd > bestD[c]) { bestD[c] = dd; bestI[c] = i; }
     }
+
+    // Crops in view, by area.
+    const acresPerPx = this.pxAcres();
+    const byCode = new Map();
+    for (let id = 0; id < n; id++) {
+      if (seen[id] && this.polys[id]) byCode.set(g.comps[id].code, (byCode.get(g.comps[id].code) || 0) + seen[id] * acresPerPx);
+    }
+    this.onStats([...byCode].map(([code, acres]) => ({ code, acres })).sort((a, b) => b.acres - a.acres));
+
     const a = map.latLngToContainerPoint([g.miny, g.minx]), c2 = map.latLngToContainerPoint([g.maxy, g.maxx]);
-    const pxArea = Math.abs(Math.hypot(c2.x - a.x, 0) / g.W * Math.hypot(0, c2.y - a.y) / g.H) || 1;
+    const pxArea = Math.abs((c2.x - a.x) / g.W * (c2.y - a.y) / g.H) || 1;
     const cands = [];
-    for (let id = 0; id < n; id++) if (seen[id] * pxArea > 2500 && bestI[id] >= 0) cands.push(id);
+    for (let id = 0; id < n; id++) {
+      if (!this.polys[id] || !(seen[id] * pxArea > 2600 && bestI[id] >= 0)) continue;
+      if (this.focus != null && g.comps[id].code !== this.focus && id !== this.selected) continue;
+      cands.push(id);
+    }
     cands.sort((p, q) => (q === this.selected) - (p === this.selected) || seen[q] - seen[p]);
 
     const taken = [];
@@ -213,7 +324,7 @@ export class FieldLayer {
       const lat = g.maxy - (y + 0.5) / g.H * (g.maxy - g.miny), lng = g.minx + (x + 0.5) / g.W * (g.maxx - g.minx);
       const p = map.latLngToContainerPoint([lat, lng]);
       const code = g.comps[id].code, name = prettyName(code);
-      const w = name.length * 7.2 + 30, h = 24;
+      const w = name.length * 7.2 + 48, h = 28;
       const r = [p.x - w / 2, p.y - h / 2, p.x + w / 2, p.y + h / 2];
       if (r[0] < 6 || r[1] < inset.top + 6 || r[2] > size.x - 6 || r[3] > size.y - inset.bottom - 6) continue;
       if (taken.some((t) => r[0] < t[2] + 6 && r[2] > t[0] - 6 && r[1] < t[3] + 6 && r[3] > t[1] - 6)) continue;
@@ -223,10 +334,16 @@ export class FieldLayer {
         // Leaflet positions the outer element with a transform, so centering goes on an inner one.
         icon: L.divIcon({
           className: 'field-label-anchor', iconSize: [0, 0],
-          html: `<span class="field-label${id === this.selected ? ' sel' : ''}"><span class="dot" style="background:${colorOf(code)}"></span>${name}</span>`,
+          html: `<span class="field-label${id === this.selected ? ' sel' : ''}" style="--c:${cropColor(code)}"><span class="emo">${cropEmoji(code)}</span>${name}</span>`,
         }),
       }).addTo(this.labels);
     }
+  }
+
+  pxAcres() {
+    const g = this.grid;
+    return ((g.maxx - g.minx) * 111320 * Math.cos(((g.miny + g.maxy) / 2) * Math.PI / 180) / g.W)
+      * ((g.maxy - g.miny) * 111320 / g.H) / 4046.86;
   }
 
   hitIndex(lat, lng) {
@@ -235,36 +352,29 @@ export class FieldLayer {
     const x = Math.min(g.W - 1, Math.floor((lng - g.minx) / (g.maxx - g.minx) * g.W));
     const y = Math.min(g.H - 1, Math.floor((g.maxy - lat) / (g.maxy - g.miny) * g.H));
     const id = g.comp[y * g.W + x];
-    return id >= 0 ? id : null;
+    return id >= 0 && this.polys[id] ? id : null;
   }
 
   // The field under a point: { id, code, acres } or null.
   fieldAt(lat, lng) {
     const id = this.hitIndex(lat, lng);
     if (id == null) return null;
-    const g = this.grid, c = g.comps[id];
-    const pxM2 = ((g.maxx - g.minx) * 111320 * Math.cos(((g.miny + g.maxy) / 2) * Math.PI / 180) / g.W) * ((g.maxy - g.miny) * 111320 / g.H);
-    return { id, code: c.code, acres: Math.round(c.count * pxM2 / 4046.86) };
+    const c = this.grid.comps[id];
+    return { id, code: c.code, acres: Math.max(1, Math.round(c.count * this.pxAcres())) };
   }
 
-  // Select the field at a point (or clear with null).
   select(id, at = null) {
     if (this.selected === id) return;
+    const prev = this.selected;
     this.selected = id;
     if (this.grid) this.grid.selPoint = at;
-    this.draw();
+    if (prev != null) this.restyle(prev);
+    if (id != null) this.restyle(id);
+    this.placeLabels();
   }
 }
 
-const rgbOf = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
-function luminance(hex) {
-  const [r, g, b] = rgbOf(hex);
-  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-}
-function mix(a, b, t) {
-  const A = rgbOf(a), B = rgbOf(b);
-  return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(',')})`;
-}
+// ---------- image processing ----------
 
 // Replace lone pixels with the crop that surrounds them.
 function despeckle(codes, W, H) {
@@ -332,11 +442,10 @@ function distanceToEdge(comp, W, H) {
 
 // Trace every field's boundary (outer edge and holes) along pixel edges, then smooth it:
 // edge midpoints turn staircases into diagonals, simplification keeps long straight edges
-// straight, and corner-cutting rounds what's left. Result: comps[id].loops = [[x,y,x,y,...], ...]
-// in grid units.
+// straight, and corner-cutting rounds what's left. comps[id].loops = [[x,y,x,y,...], ...] (grid units).
 function traceOutlines(comp, comps, W, H) {
   const V = W + 1;
-  const next = new Map();      // (vertex, field) -> end vertices of directed boundary edges
+  const next = new Map();
   const key = (v, c) => v * comps.length + c;
   const add = (c, from, to) => {
     const k = key(from, c);
@@ -346,7 +455,7 @@ function traceOutlines(comp, comps, W, H) {
   const starts = comps.map(() => []);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x, c = comp[i];
-    if (c < 0) continue;
+    if (c < 0 || comps[c].count < MIN_FIELD_PX) continue;
     const tl = y * V + x, tr = tl + 1, bl = tl + V, br = bl + 1;
     if (y === 0 || comp[i - W] !== c) { add(c, tl, tr); starts[c].push(tl); }
     if (x === W - 1 || comp[i + 1] !== c) { add(c, tr, br); starts[c].push(tr); }
@@ -368,14 +477,12 @@ function traceOutlines(comp, comps, W, H) {
         verts.push(v);
       }
       if (verts.length < 4) continue;
-      // Midpoints of the unit edges.
       const pts = [];
       for (let i = 0; i < verts.length; i++) {
         const a = verts[i], b = verts[(i + 1) % verts.length];
         pts.push(((a % V) + (b % V)) / 2, (Math.floor(a / V) + Math.floor(b / V)) / 2);
       }
-      const simple = simplify(pts, 0.45);
-      const smooth = chaikin(chaikin(simple));
+      const smooth = chaikin(chaikin(simplify(pts, 0.45)));
       if (smooth.length >= 6) f.loops.push(smooth);
     }
   });

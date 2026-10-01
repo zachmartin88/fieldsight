@@ -147,16 +147,6 @@ body.welcoming .map-hint, body.sheet-open .map-hint { display: none; }
 
 /* field labels drawn on the map */
 .field-label-anchor { width: 0; height: 0; overflow: visible; }
-.field-label {
-  position: absolute; left: 0; top: 0;
-  display: inline-flex; align-items: center; gap: 6px; transform: translate(-50%, -50%);
-  white-space: nowrap; padding: 3px 9px 3px 6px; border-radius: 999px;
-  background: rgba(10, 12, 15, 0.82); border: 1px solid rgba(255,255,255,.14);
-  color: #f3f4f6; font-size: 12px; font-weight: 700; letter-spacing: 0.01em;
-  box-shadow: 0 2px 8px rgba(0,0,0,.5);
-}
-.field-label .dot { width: 9px; height: 9px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(255,255,255,.35); }
-.field-label.sel { border-color: var(--gold); color: var(--gold); }
 .me-arrow svg { width: 30px; height: 30px; filter: drop-shadow(0 2px 4px rgba(0,0,0,.7)); }
 .tap-pin { width: 16px; height: 16px; border-radius: 50%; border: 3px solid var(--gold); background: rgba(13,15,18,.6); box-shadow: 0 0 0 3px rgba(0,0,0,.35); }
 
@@ -203,14 +193,7 @@ body.welcoming .map-hint, body.sheet-open .map-hint { display: none; }
 .badge.agree { border: 1px solid var(--gold-deep); color: var(--gold); }
 .note, .predict { font-size: 14px; line-height: 1.45; margin: 0 0 12px; color: #c4c9d2; }
 .predict { color: var(--muted); }
-.facts { font-size: 12.5px; color: var(--muted); margin: -4px 0 12px; }
-.facts b { color: var(--text); font-weight: 700; }
 
-.history { display: grid; grid-template-columns: repeat(var(--n, 6), 1fr); gap: 4px; }
-.history .yr { text-align: center; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.history .yr i { display: block; height: 8px; border-radius: 3px; margin-bottom: 4px; background: var(--line); }
-.history .yr.now { color: var(--gold); font-weight: 700; }
-.history .yr.now i { outline: 2px solid var(--gold); outline-offset: 1px; }
 .err { color: var(--warn); font-size: 14px; margin: 4px 0 0; }
 
 /* ---------- about ---------- */
@@ -297,3 +280,96 @@ dialog .fine { margin: 6px 0 16px; }
 .tbar i { height: 8px; border-radius: 4px; background: rgba(255,255,255,.06); overflow: hidden; }
 .tbar i b { display: block; height: 100%; border-radius: 4px; }
 .tbar .bval { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+/* ================= map: fields, labels, legend ================= */
+.field-label {
+  position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  padding: 3px 10px 3px 4px; border-radius: 999px;
+  background: rgba(12, 14, 18, 0.86); color: #fff; font-size: 12.5px; font-weight: 700;
+  border: 1.5px solid var(--c); box-shadow: 0 3px 10px rgba(0,0,0,.45);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+}
+.field-label .emo {
+  display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--c); font-size: 12px; line-height: 1;
+}
+.field-label.sel { border-color: #fff; box-shadow: 0 0 0 3px var(--c), 0 4px 14px rgba(0,0,0,.6); }
+.leaflet-tooltip.field-tip {
+  background: rgba(12,14,18,.92); color: #fff; border: 1px solid rgba(255,255,255,.14); border-radius: 10px;
+  font: 700 12.5px Inter, sans-serif; padding: 5px 9px; box-shadow: 0 4px 14px rgba(0,0,0,.5);
+}
+.leaflet-tooltip.field-tip::before { display: none; }
+
+.legend {
+  position: fixed; z-index: 900; left: var(--gutter); right: var(--gutter);
+  bottom: calc(var(--safe-bottom) + var(--gutter) + 72px);
+  display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px;
+  -webkit-mask-image: linear-gradient(90deg, #000 92%, transparent); mask-image: linear-gradient(90deg, #000 92%, transparent);
+}
+.legend::-webkit-scrollbar { display: none; }
+body.welcoming .legend, body.sheet-open .legend { display: none; }
+.legend button {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px 5px 5px; border-radius: 999px;
+  background: var(--glass); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1.5px solid rgba(255,255,255,.1); font-size: 12.5px; font-weight: 700; color: var(--text);
+  transition: transform .15s, border-color .15s, background .15s;
+}
+.legend button .emo { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--c); font-size: 12px; }
+.legend button em { font-style: normal; color: var(--muted); font-weight: 600; font-variant-numeric: tabular-nums; }
+.legend button:active { transform: scale(.96); }
+.legend button.on { border-color: var(--c); background: rgba(20,22,27,.95); box-shadow: 0 0 0 2px var(--c) inset; }
+.legend button.on em { color: var(--text); }
+
+/* thin progress shimmer while fields load */
+.loadbar { position: fixed; z-index: 1001; left: 0; right: 0; top: 0; height: 3px; pointer-events: none; opacity: 0; transition: opacity .3s; }
+body.loading .loadbar {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent, var(--gold), #ff8fc7, #3fd98b, transparent);
+  background-size: 50% 100%; background-repeat: no-repeat; animation: sweep 1.1s linear infinite;
+}
+@keyframes sweep { from { background-position: -50% 0; } to { background-position: 150% 0; } }
+
+/* ================= strip & detail ================= */
+.chipdot {
+  display: grid; place-items: center; flex: none; width: 1.25em; height: 1.25em; border-radius: 50%;
+  background: var(--c); font-size: .8em; line-height: 1;
+}
+.side-cell .then { gap: 4px; }
+.big-emo {
+  display: grid; place-items: center; flex: none; width: 46px; height: 46px; border-radius: 14px;
+  background: var(--c); font-size: 26px; line-height: 1; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25), 0 6px 18px -6px var(--c);
+}
+.sheet-body.two .big-emo { width: 36px; height: 36px; font-size: 20px; border-radius: 11px; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 6px; margin: 2px 0 12px; }
+.stats div { padding: 9px 10px; border-radius: 12px; background: rgba(255,255,255,.045); border: 1px solid var(--line-soft); display: grid; gap: 1px; }
+.stats b { font-size: 19px; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.stats span { font-size: 11px; color: var(--muted); line-height: 1.25; }
+
+.seasons-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin: 4px 0 7px; }
+.seasons-head span:first-child { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.seasons-head span:last-child { font-size: 12px; color: #c4c9d2; font-weight: 600; text-align: right; }
+.seasons { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; }
+.season {
+  position: relative; display: grid; justify-items: center; gap: 2px; padding: 7px 2px 6px; border-radius: 11px;
+  background: rgba(255,255,255,.04); border: 1px solid var(--line-soft); min-width: 0;
+  box-shadow: inset 0 3px 0 var(--c);
+}
+.season .yr { font-size: 10.5px; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+.season b { font-size: 20px; line-height: 1.15; }
+.season .nm { font-size: 9.5px; color: #c4c9d2; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 3px; }
+.season.now { border-color: var(--gold-deep); background: rgba(232,193,112,.08); }
+.season.now .yr { color: var(--gold); }
+.season.guess { border-style: dashed; }
+.sheet-body.two .season b { font-size: 16px; }
+.sheet-body.two .season .nm { display: none; }
+
+/* ================= trip: crops spotted ================= */
+.spotted-head { display: flex; justify-content: space-between; margin: 16px 0 8px; font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.spotted { display: flex; flex-wrap: wrap; gap: 6px; }
+.spotted span {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 4px; border-radius: 999px; font-size: 18px;
+  background: rgba(255,255,255,.045); border: 1.5px solid var(--c);
+}
+.spotted i { font-style: normal; font-size: 12px; font-weight: 700; }
