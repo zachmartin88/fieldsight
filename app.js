@@ -4,7 +4,7 @@ import {
 } from './data.js';
 import { FieldLayer, CropTiles, FIELD_MIN_ZOOM } from './fields.js';
 import { RegionLayer, COUNTY_MAX_ZOOM, topCrop, isPlanted } from './regions.js';
-import { cropColor, cropEmoji, shortName, TYPICAL_YIELD } from './palette.js';
+import { cropColor, cropEmoji, shortName, TYPICAL_YIELD, CATEGORIES, categoryOf } from './palette.js';
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
 import { scanRoute, summarize, nearestStop } from './ahead.js';
 import { parcelAt } from './parcels.js';
@@ -16,7 +16,7 @@ const els = {
   status: $('status'), statusText: $('statusText'), strip: $('strip'), welcome: $('welcome'),
   startBtn: $('startBtn'), exploreBtn: $('exploreBtn'), voiceBtn: $('voiceBtn'), menuBtn: $('menuBtn'),
   about: $('about'), recenter: $('recenterBtn'), layerToggle: $('layerToggle'), baseBtn: $('baseBtn'),
-  headBtn: $('headBtn'), legend: $('legend'), mapHint: $('mapHint'), sheet: $('sheet'), sheetBody: $('sheetBody'), sheetClose: $('sheetClose'),
+  headBtn: $('headBtn'), legend: $('legend'), keyBtn: $('keyBtn'), mapHint: $('mapHint'), sheet: $('sheet'), sheetBody: $('sheetBody'), sheetClose: $('sheetClose'),
 };
 
 const state = {
@@ -56,10 +56,11 @@ const map = L.map('map', {
 map.attributionControl.setPrefix(false);
 
 // Fields and road labels turn with the map in heading-up mode; field name labels stay upright.
-for (const [name, z] of [['fields', 350], ['labels', 420]]) {
+for (const [name, z] of [['regions', 340], ['fields', 350], ['labels', 420]]) {
   map.createPane(name, map._rotatePane || undefined);
   map.getPane(name).style.zIndex = z;
-  map.getPane(name).style.pointerEvents = 'none';
+  // Only the state/county layer takes taps itself; fields are hit-tested from the map click.
+  map.getPane(name).style.pointerEvents = name === 'regions' ? 'auto' : 'none';
 }
 
 const esri = (path, opts = {}) => L.tileLayer(`https://server.arcgisonline.com/ArcGIS/rest/services/${path}/MapServer/tile/{z}/{y}/{x}`, { maxZoom: 19, ...opts });
@@ -109,7 +110,7 @@ fields = new FieldLayer(map, {
 });
 fields.setSolid(base === 'dark');
 const regions = new RegionLayer(map, {
-  pane: 'fields', insets: mapInsets,
+  pane: 'regions', insets: mapInsets,
   onTap: (level, p, at) => openRegion(level, p, at),
   onUpdate: () => { if (map.getZoom() < FIELD_MIN_ZOOM) renderLegend(regions.statsInView()); },
 });
@@ -146,6 +147,22 @@ function syncCropZoom() {
   if (z < FIELD_MIN_ZOOM) renderLegend(regions.statsInView());
 }
 
+// ---------- color key: what each color means (broad categories) ----------
+
+function renderKey() {
+  $('keyBody').innerHTML = CATEGORIES.map((c) => `<div><i style="background:${c.color}"></i><span>${c.emoji}</span>${esc(c.name)}</div>`).join('');
+}
+function setKey(open) {
+  $('key').classList.toggle('open', open);
+  els.keyBtn.setAttribute('aria-pressed', String(open));
+  localSet('fs.key', open ? '1' : '0');
+}
+renderKey();
+els.keyBtn.addEventListener('click', () => setKey(!$('key').classList.contains('open')));
+$('keyClose').addEventListener('click', () => setKey(false));
+// Open by default on big screens; on phones it's one tap away (and remembered).
+setKey(localGet('fs.key') != null ? localGet('fs.key') === '1' : window.innerWidth >= 760);
+
 // ---------- "in view" legend: crops on screen; tap one to spotlight it ----------
 
 let lastLegendStats = null;
@@ -157,14 +174,20 @@ function renderLegend(stats) {
     return;
   }
   const total = stats.reduce((t, r) => t + r.acres, 0);
-  const top = stats.filter((r) => r.acres / total >= 0.01).slice(0, 8);
+  // Zoomed out, keep the legend to the few crops that define the region.
+  const top = stats.filter((r) => r.acres / total >= 0.01).slice(0, map.getZoom() < FIELD_MIN_ZOOM ? 4 : 8);
   if (state.focus != null && !top.some((r) => r.code === state.focus)) top.push({ code: state.focus, acres: 0 });
   const appeared = els.legend.hidden;
   els.legend.hidden = false;
   // Labels were placed before the legend showed up; place them again clear of it.
   if (appeared) requestAnimationFrame(() => fields.relabel());
-  els.legend.innerHTML = top.map((r) => `<button data-code="${r.code}" class="${r.code === state.focus ? 'on' : ''}" style="--c:${cropColor(r.code)}">
-      <span class="emo">${cropEmoji(r.code)}</span>${esc(prettyName(r.code))}<em>${r.acres ? `${Math.max(1, Math.round(r.acres / total * 100))}%` : ''}</em>${state.harvest[r.code] != null ? `<s class="cut">${Math.round(state.harvest[r.code] * 100)}% harvested</s>` : ''}</button>`).join('');
+  // Zoomed out, legend entries are broad categories ("Wheat & grains"); zoomed in, single crops.
+  const broad = map.getZoom() < FIELD_MIN_ZOOM;
+  const look = (code) => (broad && categoryOf(code)
+    ? { color: categoryOf(code).color, emoji: categoryOf(code).emoji, name: categoryOf(code).name }
+    : { color: cropColor(code), emoji: cropEmoji(code), name: prettyName(code) });
+  els.legend.innerHTML = top.map((r) => `<button data-code="${r.code}" class="${r.code === state.focus ? 'on' : ''}" style="--c:${look(r.code).color}">
+      <span class="emo">${look(r.code).emoji}</span>${esc(look(r.code).name)}<em>${r.acres ? `${Math.max(1, Math.round(r.acres / total * 100))}%` : ''}</em>${state.harvest[r.code] != null ? `<s class="cut">${Math.round(state.harvest[r.code] * 100)}% harvested</s>` : ''}</button>`).join('');
   updateHarvest(top.map((r) => r.code));
 }
 
@@ -652,11 +675,11 @@ function openRegion(level, p, at) {
   const live = state.layers?.live?.label;
   showSheet('region', `<article class="detail">
     <div class="lbl">${level === 'states' ? 'State' : 'County'} · ${live ? `${esc(live)} live map` : 'USDA map'}</div>
-    <div class="crop"><span class="big-emo" style="--c:${cropColor(t?.code)}">${t ? cropEmoji(t.code) : '🗺️'}</span><span class="crop-name">${esc(name)}</span></div>
+    <div class="crop"><span class="big-emo" style="--c:${t?.cat?.color ?? '#3a414c'}">${t?.cat?.emoji ?? '🗺️'}</span><span class="crop-name">${esc(name)}</span></div>
     <div class="stats">
       <div><b>${fmt(p.crop)}</b><span>acres planted</span></div>
       <div><b>${Math.round(p.crop / p.area * 100)}%</b><span>of the land is cropland</span></div>
-      ${t ? `<div><b>${Math.round(t.share * 100)}%</b><span>of it is ${esc(prettyName(t.code).toLowerCase())}</span></div>` : ''}
+      ${t ? `<div><b>${Math.round(t.share * 100)}%</b><span>of it is ${esc((t.cat?.name ?? prettyName(t.code)).toLowerCase())}</span></div>` : ''}
     </div>
     <div class="tbars">${planted.slice(0, 6).map(([c, a]) => `<div class="tbar"><span class="emo-sm" style="--c:${cropColor(c)}">${cropEmoji(c)}</span>
       <span class="bname">${esc(prettyName(c))}</span><i><b style="width:${(a / max * 100).toFixed(1)}%;background:${cropColor(c)}"></b></i><span class="bval">${fmt(a)} ac</span></div>`).join('')}</div>

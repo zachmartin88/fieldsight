@@ -3,7 +3,8 @@
 //   zoom 7–10  counties: tinted by top planted crop, deeper where there's more cropland; bubbles from 8
 // Data comes from data/states.json and data/counties.json (tools/build-regions.mjs).
 import { prettyName } from './data.js';
-import { cropColor, cropEmoji } from './palette.js';
+import { cropColor, cropEmoji, categoryOf } from './palette.js';
+import { mixColor } from './fields.js';
 
 export const STATE_MAX_ZOOM = 6;
 export const COUNTY_MAX_ZOOM = 10;
@@ -13,11 +14,24 @@ const GRASS = new Set([176, 171, 61]);
 // Top planted crop (not grassland/pasture) and its share of planted cropland.
 export const isPlanted = (c) => !GRASS.has(c);
 
+// Zoomed out, crops count by broad category (corn, soybeans, wheat & grains, cotton, ...), so the
+// map shows a few big crop regions instead of a patchwork. A category is represented by its first code.
+const family = (c) => categoryOf(c)?.codes[0] ?? c;
+
 export function topCrop(p) {
-  const planted = p.top.filter(([c]) => !GRASS.has(c));
-  if (!planted.length || !p.crop) return null;
-  return { code: planted[0][0], share: planted[0][1] / p.crop };
+  if (!p.crop) return null;
+  const sums = new Map();
+  for (const [c, a] of p.top) if (!GRASS.has(c)) sums.set(family(c), (sums.get(family(c)) || 0) + a);
+  const [best] = [...sums].sort((a, b) => b[1] - a[1]);
+  return best ? { code: best[0], cat: categoryOf(best[0]), share: best[1] / p.crop } : null;
 }
+const catColor = (code) => categoryOf(code)?.color ?? cropColor(code);
+const catEmoji = (code) => categoryOf(code)?.emoji ?? cropEmoji(code);
+
+// A region only gets colored when it's real farm country with a clear leading crop.
+const MIN_CROPLAND = { states: 0.06, counties: 0.12 };
+const MIN_SHARE = 0.25;
+const farmShare = (p) => (p.area ? p.crop / p.area : 0);
 
 const load = (name) => fetch(`data/${name}.json`).then((r) => r.json());
 
@@ -69,38 +83,48 @@ export class RegionLayer {
             renderer: this.renderer, style: (f) => this.style(f), interactive: true, bubblingMouseEvents: false,
             onEachFeature: (f, l) => {
               l.on('click', (e) => { L.DomEvent.stop(e); this.onTap(level, f.properties, e.latlng); });
-              l.on('mouseover', () => l.setStyle({ weight: 2.5, color: '#fff' }));
+              l.on('mouseover', () => l.setStyle({ stroke: true, weight: 2, color: '#fff', opacity: 0.9 }));
               l.on('mouseout', () => l.setStyle(this.style(f)));
             },
           });
         }
         if (this.level === level) this.layers[level].addTo(this.map);
       }
+      // Thin state lines over the borderless county view, for orientation.
+      if (level === 'counties') {
+        if (!this.stateLines) {
+          this.data.states ??= load('states');
+          const st = await this.data.states;
+          this.stateLines ??= L.geoJSON(st, { renderer: this.renderer, interactive: false, style: { fill: false, color: 'rgba(255,255,255,.3)', weight: 1 } });
+        }
+        if (this.level === 'counties') this.stateLines.addTo(this.map);
+      } else if (this.stateLines) this.map.removeLayer(this.stateLines);
     }
     this.placeLabels();
     this.onUpdate();
   }
 
   style(f) {
-    const p = f.properties, t = topCrop(p);
-    const intensity = p.area ? Math.min(1, (p.crop / p.area) * 1.6) : 0;
-    const dim = this.focus != null && t?.code !== this.focus;
-    const has = this.focus != null ? p.top.find(([c]) => c === this.focus) : null;
-    // When a crop is spotlighted, shade each region by how much of that crop it has.
+    const p = f.properties, t = topCrop(p), level = this.level;
+    const farm = farmShare(p), min = MIN_CROPLAND[level] ?? 0.1;
+    // States keep a thin outline; counties have none, so same-crop neighbours merge into regions.
+    const line = level === 'states'
+      ? { stroke: true, color: 'rgba(255,255,255,.28)', weight: 1, opacity: 1 }
+      : { stroke: false, weight: 0 };
+    // Spotlight: shade each region by how much of that crop it grows.
     if (this.focus != null) {
-      const share = has && p.crop ? has[1] / p.crop : 0;
-      return {
-        fillColor: cropColor(this.focus), fillOpacity: Math.min(0.9, share * 1.4),
-        color: 'rgba(10,12,15,.65)', weight: this.level === 'states' ? 1.2 : 0.5, opacity: 1,
-      };
+      const fam = family(this.focus);
+      const share = p.crop ? p.top.filter(([c]) => family(c) === fam).reduce((s, [, a]) => s + a, 0) / p.crop : 0;
+      const v = farm < min ? 0 : Math.min(1, share * 1.5);
+      const col = mixColor(catColor(fam), '#1b1e24', 1 - v);
+      return v ? { ...(level === 'counties' ? { stroke: true, color: col, weight: 1, opacity: 1 } : line), fillColor: col, fillOpacity: 1 } : { ...line, fillOpacity: 0 };
     }
-    return {
-      fillColor: t ? cropColor(t.code) : '#3a414c',
-      fillOpacity: t ? 0.12 + 0.68 * intensity : 0.05,
-      color: this.level === 'states' ? 'rgba(255,255,255,.35)' : 'rgba(10,12,15,.55)',
-      weight: this.level === 'states' ? 1.2 : 0.5,
-      opacity: dim ? 0.4 : 1,
-    };
+    if (!t || farm < min) return { ...line, fillOpacity: 0 };
+    // Painted solid; the whole pane is see-through (CSS), so neighbours blend with no seams.
+    // Mixed counties (no clear leader) are a muted version of their top category.
+    const col = t.share < MIN_SHARE ? mixColor(catColor(t.code), '#1b1e24', 0.6) : catColor(t.code);
+    const seam = level === 'counties' ? { stroke: true, color: col, weight: 1, opacity: 1 } : line;
+    return { ...seam, fillColor: col, fillOpacity: 1 };
   }
 
   // Bubbles like "🌽 45%": every state; counties from zoom 8, biggest cropland first, no overlaps.
@@ -116,9 +140,13 @@ export class RegionLayer {
     const taken = [];
     for (const f of feats) {
       const p = f.properties;
-      const t = this.focus != null ? (() => { const h = p.top.find(([c]) => c === this.focus); return h ? { code: this.focus, share: h[1] / p.crop } : null; })() : topCrop(p);
-      if (!t || t.share < 0.05) continue;
-      if (level === 'counties' && p.crop / p.area < 0.08) continue;
+      const t = this.focus != null ? (() => {
+        const fam = family(this.focus);
+        const a = p.top.filter(([c]) => family(c) === fam).reduce((s2, [, x]) => s2 + x, 0);
+        return a ? { code: fam, share: a / p.crop } : null;
+      })() : topCrop(p);
+      if (!t || t.share < (this.focus != null ? 0.05 : MIN_SHARE)) continue;
+      if (farmShare(p) < (MIN_CROPLAND[level] ?? 0.1)) continue;
       const pt = this.map.latLngToContainerPoint(p.at);
       const text = level === 'states' ? `${p.st}` : '';
       // Counties thin out when zoomed out: emoji only and well spaced at 8, percentages from 9.
@@ -133,7 +161,7 @@ export class RegionLayer {
         pane: this.labelPane, keyboard: false, interactive: true, bubblingMouseEvents: false,
         icon: L.divIcon({
           className: 'field-label-anchor', iconSize: [0, 0],
-          html: `<span class="region-bubble${compact ? ' compact' : ''}" style="--c:${cropColor(t.code)}" title="${prettyName(t.code)}">${text ? `<i>${text}</i>` : ''}<span class="emo">${cropEmoji(t.code)}</span>${compact ? '' : `${Math.round(t.share * 100)}%`}</span>`,
+          html: `<span class="region-bubble${compact ? ' compact' : ''}" style="--c:${catColor(t.code)}" title="${categoryOf(t.code)?.name ?? prettyName(t.code)}">${text ? `<i>${text}</i>` : ''}<span class="emo">${catEmoji(t.code)}</span>${compact ? '' : `${Math.round(t.share * 100)}%`}</span>`,
         }),
       }).on('click', (e) => { L.DomEvent.stop(e); this.onTap(level, p, L.latLng(p.at)); }).addTo(this.labels);
     }
@@ -148,7 +176,7 @@ export class RegionLayer {
     for (const f of fc.features) {
       const p = f.properties;
       if (!p.at || !b.contains(p.at)) continue;
-      for (const [c, a] of p.top) if (!GRASS.has(c)) sums.set(c, (sums.get(c) || 0) + a);
+      for (const [c, a] of p.top) if (!GRASS.has(c)) sums.set(family(c), (sums.get(family(c)) || 0) + a);
     }
     return [...sums].map(([code, acres]) => ({ code, acres })).sort((a, b) => b.acres - a.acres);
   }

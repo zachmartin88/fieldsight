@@ -481,3 +481,24 @@ body.loading .loadbar {
 #parcelOut > .predict, #parcelOut > .err { margin: 10px 18px 0; }
 .sheet-body > .sheet-actions { padding: 0 2px; margin-top: 4px; }
 .parcel .lbl { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+
+/* ================= color key ================= */
+.key {
+  position: fixed; z-index: 950; right: var(--gutter); bottom: calc(var(--safe-bottom) + var(--gutter) + 120px);
+  width: 196px; padding: 10px 12px 12px; border-radius: 16px; display: none;
+  background: var(--glass); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--line-soft); box-shadow: 0 10px 28px -12px rgba(0,0,0,.8);
+}
+.key.open { display: block; animation: pop .2s both; }
+body.welcoming .key, body.sheet-open .key { display: none; }
+.key header { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.key header button { background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1; padding: 0 2px; }
+.key-body { display: grid; gap: 4px; }
+.key-body div { display: grid; grid-template-columns: 14px 18px 1fr; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
+.key-body i { width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
+.key-body span { font-size: 13px; }
+#keyBtn svg circle { fill: var(--muted); stroke: none; }
+#keyBtn[aria-pressed="true"] svg circle { fill: var(--gold); }
+@media (min-width: 760px) { .key { bottom: auto; top: calc(var(--safe-top) + var(--gutter) + 72px); } }
+/* zoomed-out summaries are painted solid and faded as one layer (no seams between counties) */
+.leaflet-regions-pane { opacity: .62; }

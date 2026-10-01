@@ -83,3 +83,20 @@ const SHORT = {
   190: 'Wetland', 195: 'Wetland', 152: 'Shrub',
 };
 export const shortName = (code) => SHORT[code] ?? prettyName(code);
+
+// Broad categories: the zoomed-out map and the color key use these, so the big picture reads as a
+// handful of regions (corn country, wheat country, cotton country...) instead of 100 crop shades.
+export const CATEGORIES = [
+  { id: 'corn', name: 'Corn', emoji: '🌽', color: '#ffc53d', codes: [1, 12, 13, 241] },
+  { id: 'soy', name: 'Soybeans', emoji: '🫘', color: '#3fd98b', codes: [5, 254, 239, 240] },
+  { id: 'grain', name: 'Wheat & grains', emoji: '🌾', color: '#f2994a', codes: [24, 23, 22, 21, 28, 27, 29, 25, 205, 39, 4, 26, 225, 226, 236, 237, 238, 234, 235] },
+  { id: 'cotton', name: 'Cotton', emoji: '☁️', color: '#ff8fc7', codes: [2, 232] },
+  { id: 'rice', name: 'Rice', emoji: '🍚', color: '#47c6ff', codes: [3] },
+  { id: 'hay', name: 'Hay & alfalfa', emoji: '🌿', color: '#b39dff', codes: [36, 37, 58, 59, 60] },
+  { id: 'orchard', name: 'Orchards & vines', emoji: '🍇', color: '#ff9f80', codes: [66, 67, 68, 69, 70, 71, 72, 74, 75, 76, 77, 204, 210, 211, 212, 215, 217, 218, 220, 223, 242, 250] },
+  { id: 'veg', name: 'Vegetables & melons', emoji: '🥕', color: '#ef4f6b', codes: [47, 48, 49, 50, 54, 206, 207, 208, 209, 213, 214, 216, 219, 221, 222, 224, 227, 229, 230, 231, 233, 243, 244, 245, 246, 247, 248, 249] },
+  { id: 'other', name: 'Other crops', emoji: '🌻', color: '#2fd0c5', codes: [6, 10, 11, 31, 32, 33, 41, 42, 43, 44, 45, 46, 52, 53, 14, 57, 56, 38, 35, 34] },
+  { id: 'pasture', name: 'Grass & pasture', emoji: '🐄', color: '#b5d99c', codes: [176, 171] },
+];
+const CAT_OF = new Map(CATEGORIES.flatMap((c) => c.codes.map((code) => [code, c])));
+export const categoryOf = (code) => CAT_OF.get(code) ?? (isAg(code) && code !== 61 ? CATEGORIES.find((c) => c.id === 'other') : null);
