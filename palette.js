@@ -5,17 +5,17 @@ import { prettyName, isAg } from './data.js';
 
 // code -> [color, emoji]
 const CROPS = {
-  1: ['#ffc53d', '🌽'], 12: ['#ffe27a', '🌽'], 13: ['#ffd66b', '🍿'],
-  5: ['#3fd98b', '🫘'], 26: ['#9be15d', '🌾'], 254: ['#7fd98a', '🫘'], 241: ['#c9d84a', '🌽'],
-  24: ['#f2a65a', '🌾'], 23: ['#f7c08a', '🌾'], 22: ['#e8914a', '🌾'], 225: ['#f4b942', '🌾'],
+  1: ['#ffc928', '🌽'], 12: ['#ffe27a', '🌽'], 13: ['#ffd66b', '🍿'],
+  5: ['#22c55e', '🫘'], 26: ['#9be15d', '🌾'], 254: ['#7fd98a', '🫘'], 241: ['#c9d84a', '🌽'],
+  24: ['#fb7a24', '🌾'], 23: ['#f7c08a', '🌾'], 22: ['#e8914a', '🌾'], 225: ['#f4b942', '🌾'],
   236: ['#f08a5d', '🌾'], 238: ['#f59ac0', '🌾'],
   21: ['#f6b26b', '🌾'], 28: ['#d7a6f0', '🌾'], 27: ['#c58cf0', '🌾'], 29: ['#e0b0ff', '🌾'],
   25: ['#e4b4d8', '🌾'], 205: ['#d9a6e8', '🌾'], 39: ['#c9a27a', '🌾'],
-  2: ['#ff8fc7', '☁️'], 3: ['#47c6ff', '🍚'], 4: ['#ff7a59', '🌾'], 6: ['#ffe14d', '🌻'],
+  2: ['#f472b6', '☁️'], 3: ['#38bdf8', '🍚'], 4: ['#ff7a59', '🌾'], 6: ['#ffe14d', '🌻'],
   10: ['#d9a066', '🥜'], 11: ['#9ccf6a', '🍂'], 31: ['#e8f06a', '🌼'], 33: ['#ffe066', '🌼'],
   32: ['#8ab4ff', '🌸'], 41: ['#e070ff', '🍬'], 42: ['#b07a5a', '🫘'], 43: ['#b08968', '🥔'],
   45: ['#29d3c7', '🎋'], 46: ['#d4705a', '🍠'], 53: ['#9ee37d', '🫛'], 52: ['#7ccf9e', '🫘'],
-  36: ['#a98bff', '🌿'], 37: ['#c4b0ff', '🌾'], 58: ['#ff9fd8', '🍀'], 59: ['#86e3a8', '🌱'],
+  36: ['#a78bfa', '🌿'], 37: ['#c4b0ff', '🌾'], 58: ['#ff9fd8', '🍀'], 59: ['#86e3a8', '🌱'],
   60: ['#7fd6b3', '🌾'], 61: ['#d8c3a5', '🟫'],
   44: ['#6fd6c9', '🌱'], 47: ['#ff6b6b', '🥬'], 49: ['#c8a2ff', '🧅'], 54: ['#ff5d5d', '🍅'],
   48: ['#ff7b7b', '🍉'], 50: ['#7bd67b', '🥒'], 206: ['#ff9f45', '🥕'], 208: ['#d6b3ff', '🧄'],
@@ -30,7 +30,7 @@ const CROPS = {
   210: ['#ff9e8a', '🍑'], 211: ['#7fae5a', '🫒'], 212: ['#ff9a3d', '🍊'], 217: ['#ff8f6b', '🍎'],
   218: ['#ffa07a', '🍑'], 220: ['#c77dff', '🍑'], 223: ['#ffc48a', '🍑'], 215: ['#7bd17b', '🥑'],
   14: ['#6fe3c0', '🌿'], 57: ['#6fe3c0', '🌿'], 56: ['#9ad05a', '🍺'],
-  176: ['#b5d99c', '🐄'], 171: ['#b5d99c', '🐄'],
+  176: ['#cdb98a', '🐄'], 171: ['#cdb98a', '🐄'],
 };
 
 // Non-farm cover: muted, so farmland stands out.
@@ -87,16 +87,16 @@ export const shortName = (code) => SHORT[code] ?? prettyName(code);
 // Broad categories: the zoomed-out map and the color key use these, so the big picture reads as a
 // handful of regions (corn country, wheat country, cotton country...) instead of 100 crop shades.
 export const CATEGORIES = [
-  { id: 'corn', name: 'Corn', emoji: '🌽', color: '#ffc53d', codes: [1, 12, 13, 241] },
-  { id: 'soy', name: 'Soybeans', emoji: '🫘', color: '#3fd98b', codes: [5, 254, 239, 240] },
-  { id: 'grain', name: 'Wheat & grains', emoji: '🌾', color: '#f2994a', codes: [24, 23, 22, 21, 28, 27, 29, 25, 205, 39, 4, 26, 225, 226, 236, 237, 238, 234, 235] },
-  { id: 'cotton', name: 'Cotton', emoji: '☁️', color: '#ff8fc7', codes: [2, 232] },
-  { id: 'rice', name: 'Rice', emoji: '🍚', color: '#47c6ff', codes: [3] },
-  { id: 'hay', name: 'Hay & alfalfa', emoji: '🌿', color: '#b39dff', codes: [36, 37, 58, 59, 60] },
-  { id: 'orchard', name: 'Orchards & vines', emoji: '🍇', color: '#ff9f80', codes: [66, 67, 68, 69, 70, 71, 72, 74, 75, 76, 77, 204, 210, 211, 212, 215, 217, 218, 220, 223, 242, 250] },
-  { id: 'veg', name: 'Vegetables & melons', emoji: '🥕', color: '#ef4f6b', codes: [47, 48, 49, 50, 54, 206, 207, 208, 209, 213, 214, 216, 219, 221, 222, 224, 227, 229, 230, 231, 233, 243, 244, 245, 246, 247, 248, 249] },
-  { id: 'other', name: 'Other crops', emoji: '🌻', color: '#2fd0c5', codes: [6, 10, 11, 31, 32, 33, 41, 42, 43, 44, 45, 46, 52, 53, 14, 57, 56, 38, 35, 34] },
-  { id: 'pasture', name: 'Grass & pasture', emoji: '🐄', color: '#b5d99c', codes: [176, 171] },
+  { id: 'corn', name: 'Corn', emoji: '🌽', color: '#ffc928', codes: [1, 12, 13, 241] },
+  { id: 'soy', name: 'Soybeans', emoji: '🫘', color: '#22c55e', codes: [5, 254, 239, 240] },
+  { id: 'grain', name: 'Wheat & grains', emoji: '🌾', color: '#fb7a24', codes: [24, 23, 22, 21, 28, 27, 29, 25, 205, 39, 4, 26, 225, 226, 236, 237, 238, 234, 235] },
+  { id: 'cotton', name: 'Cotton', emoji: '☁️', color: '#f472b6', codes: [2, 232] },
+  { id: 'rice', name: 'Rice', emoji: '🍚', color: '#38bdf8', codes: [3] },
+  { id: 'hay', name: 'Hay & alfalfa', emoji: '🌿', color: '#a78bfa', codes: [36, 37, 58, 59, 60] },
+  { id: 'orchard', name: 'Orchards & vines', emoji: '🍇', color: '#d946ef', codes: [66, 67, 68, 69, 70, 71, 72, 74, 75, 76, 77, 204, 210, 211, 212, 215, 217, 218, 220, 223, 242, 250] },
+  { id: 'veg', name: 'Vegetables & melons', emoji: '🥕', color: '#ef4444', codes: [47, 48, 49, 50, 54, 206, 207, 208, 209, 213, 214, 216, 219, 221, 222, 224, 227, 229, 230, 231, 233, 243, 244, 245, 246, 247, 248, 249] },
+  { id: 'other', name: 'Other crops', emoji: '🌻', color: '#14b8a6', codes: [6, 10, 11, 31, 32, 33, 41, 42, 43, 44, 45, 46, 52, 53, 14, 57, 56, 38, 35, 34] },
+  { id: 'pasture', name: 'Grass & pasture', emoji: '🐄', color: '#cdb98a', codes: [176, 171] },
 ];
 const CAT_OF = new Map(CATEGORIES.flatMap((c) => c.codes.map((code) => [code, c])));
 export const categoryOf = (code) => CAT_OF.get(code) ?? (isAg(code) && code !== 61 ? CATEGORIES.find((c) => c.id === 'other') : null);

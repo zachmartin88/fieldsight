@@ -36,7 +36,9 @@ const farmShare = (p) => (p.area ? p.crop / p.area : 0);
 const load = (name) => fetch(`data/${name}.json`).then((r) => r.json());
 
 export class RegionLayer {
-  constructor(map, { pane, labelPane = 'markerPane', onTap, insets, onUpdate } = {}) {
+  constructor(map, { pane, outlinePane, labelPane = 'markerPane', onTap, insets, onUpdate, reserved } = {}) {
+    this.reserved = reserved || (() => []);
+    this.outlineRenderer = outlinePane ? L.canvas({ pane: outlinePane, padding: 0.3 }) : null;
     this.onUpdate = onUpdate || (() => {});
     this.map = map;
     this.labelPane = labelPane;
@@ -51,6 +53,7 @@ export class RegionLayer {
     this.enabled = true;
     this.focus = null;
     map.on('zoomend moveend', () => this.update());
+    map.on('zoomend', () => { if (this.level === 'counties') this.layers.counties?.setStyle((f) => this.style(f)); });
   }
 
   setEnabled(on) { this.enabled = on; this.update(); }
@@ -90,12 +93,24 @@ export class RegionLayer {
         }
         if (this.level === level) this.layers[level].addTo(this.map);
       }
+      // A soft glow around the country (states drawn with a wide stroke under the fills).
+      if (level && this.outlineRenderer) {
+        if (!this.glow) {
+          this.data.states ??= load('states');
+          const st = await this.data.states;
+          this.glow ??= L.featureGroup([
+            L.geoJSON(st, { renderer: this.outlineRenderer, interactive: false, style: { fill: false, color: '#ffd76b', weight: 14, opacity: 0.12 } }),
+            L.geoJSON(st, { renderer: this.outlineRenderer, interactive: false, style: { fill: false, color: '#fff2c4', weight: 4, opacity: 0.55 } }),
+          ]);
+        }
+        if (this.level) this.glow.addTo(this.map);
+      } else if (this.glow) this.map.removeLayer(this.glow);
       // Thin state lines over the borderless county view, for orientation.
       if (level === 'counties') {
         if (!this.stateLines) {
           this.data.states ??= load('states');
           const st = await this.data.states;
-          this.stateLines ??= L.geoJSON(st, { renderer: this.renderer, interactive: false, style: { fill: false, color: 'rgba(255,255,255,.3)', weight: 1 } });
+          this.stateLines ??= L.geoJSON(st, { renderer: this.renderer, interactive: false, style: { fill: false, color: '#ffffff', weight: 1.5, opacity: 0.6 } });
         }
         if (this.level === 'counties') this.stateLines.addTo(this.map);
       } else if (this.stateLines) this.map.removeLayer(this.stateLines);
@@ -109,7 +124,7 @@ export class RegionLayer {
     const farm = farmShare(p), min = MIN_CROPLAND[level] ?? 0.1;
     // States keep a thin outline; counties have none, so same-crop neighbours merge into regions.
     const line = level === 'states'
-      ? { stroke: true, color: 'rgba(255,255,255,.28)', weight: 1, opacity: 1 }
+      ? { stroke: true, color: '#ffffff', weight: 1.6, opacity: 0.7 }
       : { stroke: false, weight: 0 };
     // Spotlight: shade each region by how much of that crop it grows.
     if (this.focus != null) {
@@ -125,7 +140,10 @@ export class RegionLayer {
     // Painted solid; the whole pane is see-through (CSS), so neighbours blend with no seams.
     const strength = (0.3 + 0.7 * Math.sqrt(Math.min(1, farm / 0.55))) * (t.share < MIN_SHARE ? 0.8 : 1);
     const col = mixColor(catColor(t.code), '#1b1e24', 1 - strength);
-    const seam = level === 'counties' ? { stroke: true, color: col, weight: 1, opacity: 1 } : line;
+    // Counties: an edge in the fill color hides seams; from zoom 8 a faint dark line shows each county.
+    const seam = level !== 'counties' ? line
+      : this.map.getZoom() >= 8 ? { stroke: true, color: '#0d0f12', weight: 0.7, opacity: 0.55 }
+        : { stroke: true, color: col, weight: 1, opacity: 1 };
     return { ...seam, fillColor: col, fillOpacity: 1 };
   }
 
@@ -139,7 +157,7 @@ export class RegionLayer {
     const size = this.map.getSize(), inset = this.insets();
     const feats = fc.features.filter((f) => f.properties.at && f.properties.crop > 0)
       .sort((a, b) => b.properties.crop - a.properties.crop);
-    const taken = [];
+    const taken = [...this.reserved()];
     for (const f of feats) {
       const p = f.properties;
       const t = this.focus != null ? (() => {

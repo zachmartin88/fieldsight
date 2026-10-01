@@ -470,7 +470,7 @@ body.loading .loadbar {
 .ribbon div { display: flex; height: 14px; border-radius: 4px; overflow: hidden; }
 .ribbon i { flex: 1; min-width: 0; }
 .ribbon-axis { display: flex; justify-content: space-between; padding-left: 20px; font-size: 10.5px; color: var(--muted); margin-top: 3px; }
-.legend button s.cut { text-decoration: none; font-size: 11px; font-weight: 700; color: #1a1408; background: #c9b48e; padding: 1px 6px; border-radius: 999px; margin-left: 2px; }
+.legend button s.cut { text-decoration: none; font-size: 11px; font-weight: 700; color: #fff; background: #8a6a48; padding: 1px 6px; border-radius: 999px; margin-left: 2px; }
 
 /* ================= parcels ================= */
 .parcel { margin: 12px 18px 4px; padding: 12px 14px; border-radius: 14px; background: rgba(255,255,255,.045); border: 1px solid var(--line-soft); }
@@ -485,7 +485,7 @@ body.loading .loadbar {
 /* ================= color key ================= */
 .key {
   position: fixed; z-index: 950; right: var(--gutter); bottom: calc(var(--safe-bottom) + var(--gutter) + 120px);
-  width: 196px; padding: 10px 12px 12px; border-radius: 16px; display: none;
+  width: 268px; padding: 12px 12px 12px; border-radius: 18px; display: none;
   background: var(--glass); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   border: 1px solid var(--line-soft); box-shadow: 0 10px 28px -12px rgba(0,0,0,.8);
 }
@@ -493,14 +493,58 @@ body.loading .loadbar {
 body.welcoming .key, body.sheet-open .key { display: none; }
 .key header { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
 .key header button { background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1; padding: 0 2px; }
-.key-body { display: grid; gap: 4px; }
-.key-body div { display: grid; grid-template-columns: 14px 18px 1fr; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
-.key-body i { width: 14px; height: 14px; border-radius: 4px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
-.key-body span { font-size: 13px; }
 #keyBtn svg circle { fill: var(--muted); stroke: none; }
 #keyBtn[aria-pressed="true"] svg circle { fill: var(--gold); }
 @media (min-width: 760px) { .key { bottom: auto; top: calc(var(--safe-top) + var(--gutter) + 72px); } }
 /* zoomed-out summaries are painted solid and faded as one layer (no seams between counties) */
-.leaflet-regions-pane { opacity: .62; }
+.leaflet-regions-pane { opacity: .8; }
 .key-note { margin: 6px 0 0; display: grid; gap: 4px; font-size: 11px; color: var(--muted); line-height: 1.35; }
 .key-note .ramp { display: block; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #3c3a33, #8a7340, #ffc53d); }
+
+/* ---- fun color key ---- */
+.key header span::before { content: '🌱 '; }
+.key-body { display: grid; gap: 5px; }
+.key-body button {
+  display: grid; grid-template-columns: 28px 1fr 38px 30px; align-items: center; gap: 7px;
+  padding: 4px 8px 4px 4px; border-radius: 999px; text-align: left;
+  background: rgba(255,255,255,.04); border: 1.5px solid transparent; color: var(--text);
+  transition: transform .15s, border-color .15s, background .15s;
+}
+.key-body button:hover { transform: translateX(-2px) scale(1.02); border-color: var(--c); }
+.key-body button.on { border-color: var(--c); background: color-mix(in srgb, var(--c) 22%, transparent); }
+.key-body .kemo {
+  display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; font-size: 15px;
+  background: var(--c); box-shadow: 0 0 0 2px rgba(255,255,255,.18), 0 3px 10px -2px var(--c);
+}
+.key-body button:hover .kemo { animation: wiggle .5s ease; }
+.key-body .kname { font-size: 12.5px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.key-body .kbar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; }
+.key-body .kbar i { display: block; height: 100%; border-radius: 3px; background: var(--c); }
+.key-body em { font-style: normal; font-size: 11px; font-weight: 800; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+@keyframes wiggle { 25% { transform: rotate(-14deg); } 75% { transform: rotate(12deg); } }
+
+/* ---- famous farm regions ---- */
+.belt {
+  position: absolute; left: 0; top: 0; cursor: pointer; white-space: nowrap;
+  transform: translate(-50%, -50%) rotate(var(--rot)) scale(var(--s));
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 14px 5px 5px; border-radius: 999px;
+  background: rgba(12, 14, 18, 0.82); border: 2px solid var(--c);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--c) 25%, transparent), 0 0 26px color-mix(in srgb, var(--c) 70%, transparent);
+  animation: bob 4s ease-in-out infinite;
+}
+.belt .be { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--c); font-size: 17px; }
+.belt .bn { font-size: 14px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; color: #fff; text-shadow: 0 0 10px var(--c); }
+.belt:hover { animation-play-state: paused; filter: brightness(1.15); }
+@keyframes bob { 50% { transform: translate(-50%, calc(-50% - 3px)) rotate(var(--rot)) scale(var(--s)); } }
+.belt-sheet .belt-sub { font-size: 13px; color: #c4c9d2; font-weight: 600; margin: -2px 0 10px; }
+.belt-fact { font-size: 15.5px; line-height: 1.5; margin: 0 0 6px; padding: 12px 14px; border-radius: 14px;
+  background: color-mix(in srgb, var(--c) 14%, transparent); border: 1px solid color-mix(in srgb, var(--c) 45%, transparent); }
+.belt-fact::before { content: '💡 '; }
+@media (max-width: 759px) {
+  .key { width: 222px; padding: 10px; bottom: calc(var(--safe-bottom) + var(--gutter) + 122px); max-height: calc(100vh - 260px); overflow-y: auto; }
+  .key-body { gap: 3px; }
+  .key-body button { grid-template-columns: 24px 1fr 26px; padding: 3px 7px 3px 3px; }
+  .key-body .kemo { width: 24px; height: 24px; font-size: 13px; }
+  .key-body .kname { font-size: 12px; }
+  .key-body .kbar { display: none; }
+}

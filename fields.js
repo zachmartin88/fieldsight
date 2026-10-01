@@ -380,7 +380,7 @@ export class FieldLayer {
 
   styleFor(id, c = this.grid.comps[id]) {
     const base = cropColor(c.code), cut = this.harvest[c.code] || 0;
-    const col = cut ? mixColor(base, '#c9b48e', Math.min(0.85, cut * 0.85)) : base;
+    const col = cut ? mixColor(base, '#8a6a48', Math.min(0.85, cut * 0.85)) : base;
     const sel = id === this.selected, hov = id === this.hovered;
     const dim = this.focus != null && c.code !== this.focus && !sel;
     const grassy = c.code === 176 || c.code === 171;

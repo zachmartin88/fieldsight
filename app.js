@@ -8,6 +8,7 @@ import { cropColor, cropEmoji, shortName, TYPICAL_YIELD, CATEGORIES, categoryOf 
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
 import { scanRoute, summarize, nearestStop } from './ahead.js';
 import { parcelAt } from './parcels.js';
+import { BeltLayer } from './belts.js';
 import { fieldCard, albumCard, shareCanvas, placeName, countyName } from './share.js';
 import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate } from './album.js';
 
@@ -56,7 +57,7 @@ const map = L.map('map', {
 map.attributionControl.setPrefix(false);
 
 // Fields and road labels turn with the map in heading-up mode; field name labels stay upright.
-for (const [name, z] of [['regions', 340], ['fields', 350], ['labels', 420]]) {
+for (const [name, z] of [['outline', 330], ['regions', 340], ['fields', 350], ['labels', 420]]) {
   map.createPane(name, map._rotatePane || undefined);
   map.getPane(name).style.zIndex = z;
   // Only the state/county layer takes taps itself; fields are hit-tested from the map click.
@@ -110,10 +111,14 @@ fields = new FieldLayer(map, {
 });
 fields.setSolid(base === 'dark');
 const regions = new RegionLayer(map, {
-  pane: 'regions', insets: mapInsets,
+  pane: 'regions', outlinePane: 'outline', insets: mapInsets,
+  reserved: () => belts?.rects() ?? [],
   onTap: (level, p, at) => openRegion(level, p, at),
   onUpdate: () => { if (map.getZoom() < FIELD_MIN_ZOOM) renderLegend(regions.statsInView()); },
 });
+// Famous farm regions ("The Corn Belt 🌽") on the zoomed-out map.
+let belts = null;
+belts = new BeltLayer(map, { onTap: (b) => openBelt(b) });
 const crop = { which: localGet('fs.layer') || 'live', tiles: null };
 
 function cropSource(which) {
@@ -135,6 +140,7 @@ function setCrop(which) {
   }
   fields.setEnabled(!!src);
   regions.setEnabled(!!src);
+  belts.setEnabled(!!src);
   syncCropZoom();
 }
 // Zoom tiers: state/county summaries (≤10), crop-colored detail (11), individual fields (≥12).
@@ -149,10 +155,32 @@ function syncCropZoom() {
 
 // ---------- color key: what each color means (broad categories) ----------
 
-function renderKey() {
-  $('keyBody').innerHTML = CATEGORIES.map((c) => `<div><i style="background:${c.color}"></i><span>${c.emoji}</span>${esc(c.name)}</div>`).join('');
-  $('keyBody').insertAdjacentHTML('beforeend', '<p class="key-note"><b class="ramp"></b>Deeper color = more of the land is farmed</p>');
+async function renderKey() {
+  // Share of U.S. cropland per category (from the state summaries), for a little "how big is it" bar.
+  const share = new Map();
+  try {
+    const st = await (await fetch('data/states.json')).json();
+    let total = 0;
+    for (const f of st.features) for (const [c, a] of f.properties.top) {
+      const cat = categoryOf(c);
+      if (!cat || cat.id === 'pasture') continue;
+      share.set(cat.id, (share.get(cat.id) || 0) + a); total += a;
+    }
+    for (const [k, v] of share) share.set(k, v / total);
+  } catch { /* key still works without the numbers */ }
+  const max = Math.max(...share.values(), 0.01);
+  $('keyBody').innerHTML = CATEGORIES.map((c) => `<button data-code="${c.codes[0]}" style="--c:${c.color}">
+      <span class="kemo">${c.emoji}</span><span class="kname">${esc(c.name)}</span>
+      ${share.has(c.id) ? `<span class="kbar"><i style="width:${(share.get(c.id) / max * 100).toFixed(0)}%"></i></span><em>${Math.max(1, Math.round(share.get(c.id) * 100))}%</em>` : '<span class="kbar"></span><em></em>'}
+    </button>`).join('');
+  $('keyBody').insertAdjacentHTML('beforeend', '<p class="key-note"><b class="ramp"></b>Deeper color = more of the land is farmed · % = share of U.S. cropland · tap a crop to spotlight it</p>');
 }
+$('keyBody').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-code]');
+  if (!b) return;
+  const code = +b.dataset.code;
+  spotlight(state.focus === code ? null : code);
+});
 function setKey(open) {
   $('key').classList.toggle('open', open);
   els.keyBtn.setAttribute('aria-pressed', String(open));
@@ -214,14 +242,18 @@ async function updateHarvest(codes) {
   fields.setHarvest(next);
   if (changed && !els.legend.hidden) renderLegend(lastLegendStats);
 }
+function spotlight(code) {
+  state.focus = code;
+  fields.setFocus(code);
+  regions.setFocus(code);
+  els.legend.querySelectorAll('button').forEach((x) => x.classList.toggle('on', +x.dataset.code === code));
+  $('keyBody').querySelectorAll('[data-code]').forEach((x) => x.classList.toggle('on', +x.dataset.code === code));
+}
 els.legend.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   const code = +b.dataset.code;
-  state.focus = state.focus === code ? null : code;
-  fields.setFocus(state.focus);
-  regions.setFocus(state.focus);
-  b.parentElement.querySelectorAll('button').forEach((x) => x.classList.toggle('on', +x.dataset.code === state.focus));
+  spotlight(state.focus === code ? null : code);
 });
 map.on('zoomend moveend', syncCropZoom);
 els.layerToggle.addEventListener('click', (e) => {
@@ -665,6 +697,19 @@ function closeSheet() {
 els.sheetClose.addEventListener('click', closeSheet);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
+// ---------- famous farm regions ----------
+
+function openBelt(b) {
+  const c = CATEGORIES.find((x) => x.id === b.cat);
+  showSheet('belt', `<article class="detail belt-sheet" style="--c:${c.color}">
+    <div class="lbl">Famous farm region</div>
+    <div class="crop"><span class="big-emo" style="--c:${c.color}">${b.emoji}</span><span class="crop-name">${esc(b.name)}</span></div>
+    <div class="belt-sub">📍 ${esc(b.sub)}</div>
+    <p class="belt-fact">${esc(b.fact)}</p>
+    <div class="sheet-actions"><button class="primary" data-act="beltspot" data-code="${c.codes[0]}">🔦 Spotlight ${esc(c.name.toLowerCase())}</button><button class="ghost" data-act="zoomto" data-lat="${b.fly[0]}" data-lng="${b.fly[1]}" data-z="${b.fly[2]}">✈️ Fly there</button></div>
+  </article>`);
+}
+
 // ---------- tapping a state or county ----------
 
 function openRegion(level, p, at) {
@@ -989,6 +1034,7 @@ els.sheetBody.addEventListener('click', async (e) => {
   else if (act === 'routes') openRoutes();
   else if (act === 'about') { closeSheet(); els.about.showModal(); }
   else if (act === 'close') closeSheet();
+  else if (act === 'beltspot') { closeSheet(); spotlight(+b.dataset.code); }
   else if (act === 'share') openShareCard();
   else if (act === 'parcel') showParcel(+b.dataset.lat, +b.dataset.lng, b);
   else if (act === 'sharego') {
