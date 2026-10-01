@@ -10,7 +10,10 @@ import { scanRoute, summarize, nearestStop } from './ahead.js';
 import { parcelAt } from './parcels.js';
 import { BeltLayer, BELTS, nextFact, randomFact } from './belts.js';
 import { fieldCard, albumCard, shareCanvas, placeName, countyName } from './share.js';
-import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate } from './album.js';
+import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate, rarityOf } from './album.js';
+import { fx, kernel, settings, stats, saveStats, addMiles, checkBadges, badgesHtml } from './fun.js';
+import { bingoCard, bingoSpot, bingoHtml, guessRound, satelliteHtml, cropOfTheDay, cropFacts, cropBlurb, countyFacts } from './games.js';
+import { SeasonLayer, season } from './season.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -106,7 +109,7 @@ fields = new FieldLayer(map, {
     if (state.mode !== 'drive') setStatus(on ? 'Loading fields…' : 'Ready', on ? 'busy' : '');
   },
   // Only the layer that's showing drives the legend (fields here, regions when zoomed out).
-  onStats: (stats) => { if (map.getZoom() >= FIELD_MIN_ZOOM) renderLegend(stats); },
+  onStats: (st) => { if (map.getZoom() >= FIELD_MIN_ZOOM) { renderLegend(st); seasons?.placeTractors(fields); } },
   insets: mapInsets,
 });
 fields.setSolid(base === 'dark');
@@ -118,7 +121,9 @@ const regions = new RegionLayer(map, {
 });
 // Famous farm regions ("The Corn Belt 🌽") on the zoomed-out map.
 let belts = null;
+let seasons = null;
 belts = new BeltLayer(map, { onTap: (b) => openBelt(b) });
+seasons = new SeasonLayer(map, { isDriving: () => state.mode === 'drive' });
 const crop = { which: localGet('fs.layer') || 'live', tiles: null };
 
 function cropSource(which) {
@@ -439,7 +444,12 @@ async function collect(res) {
     placeName(res.lat, res.lon).then((p) => {
       state.place = p;
       const st = p ? Object.entries(STATE_ABBR).find(([, n]) => n === p.state)?.[0] : null;
-      if (st && recordState(state.album, st)) toast(`🗺️ New state stamp: ${p.state}!`);
+      if (st && recordState(state.album, st)) {
+        toast(`🗺️ New state stamp: ${p.state}!`);
+        fx('ding');
+        kernel(`Welcome to <b>${esc(p.state)}</b>! 🗺️ New stamp for your album.`);
+        rewardBadges();
+      }
     });
   }
   for (const s of Object.values(res.sides)) {
@@ -447,7 +457,24 @@ async function collect(res) {
     const r = recordSighting(state.album, s.code, { ...here, place: state.place?.short });
     if (r && (r.isNew || r.levelUp)) {
       celebrate(document.body, s.code, r.card, { levelUp: r.levelUp });
-      if (r.isNew) speak(`New card: ${prettyName(s.code)}!`);
+      fx('card');
+      if (r.isNew) {
+        speak(`New card: ${prettyName(s.code)}!`);
+        const rar = rarityOf(s.code);
+        if (rar.id !== 'common') setTimeout(() => kernel(`Whoa, a <b>${rar.name.toLowerCase()}</b> card! ${cropEmoji(s.code)} Not everyone finds one of those.`, { mood: 'excited' }), 3200);
+      }
+      rewardBadges();
+    }
+    // Road-trip bingo.
+    const b = isAg(s.code) ? bingoSpot(s.code) : null;
+    if (b) {
+      fx(b.newLines ? 'win' : 'pop');
+      toast(`🎯 Bingo square: ${cropEmoji(s.code)} ${prettyName(s.code)}`);
+      if (b.newLines) {
+        stats.bingos += b.newLines; saveStats();
+        setTimeout(() => kernel(b.blackout ? '🌟 <b>BLACKOUT!</b> You found every crop on today\'s card!' : '🎯 <b>BINGO!</b> Three in a row!', { mood: 'excited', ms: 6000 }), 600);
+        rewardBadges();
+      }
     }
   }
 }
@@ -457,6 +484,16 @@ fetch('data/states.json').then((r) => r.json()).then((j) => {
   STATE_ABBR = Object.fromEntries(j.features.map((f) => [f.properties.st, f.properties.name]).sort());
 }).catch(() => {});
 loadRarity();
+
+// Milestone badges: check after anything that could earn one.
+function rewardBadges() {
+  const fresh = checkBadges(state.album, albumSummary(state.album));
+  fresh.forEach((b, i) => setTimeout(() => {
+    fx('ding');
+    toast(`🏅 Badge unlocked: ${b.emoji} ${b.name}`);
+    kernel(`You earned the <b>${b.emoji} ${esc(b.name)}</b> badge! ${esc(b.desc)}.`, { mood: 'excited' });
+  }, 1200 + i * 3500));
+}
 
 function toast(text) {
   const el = document.createElement('div');
@@ -468,7 +505,8 @@ function toast(text) {
 }
 
 function openAlbum() {
-  showSheet('album', albumHtml(state.album, Object.entries(STATE_ABBR)));
+  showSheet('album', albumHtml(state.album, Object.entries(STATE_ABBR))
+    .replace('<div class="sheet-actions">', `<section class="cset"><header><span>🏅 Badge locker</span></header>${badgesHtml()}</section><div class="sheet-actions">`));
 }
 
 // ---------- the top strip ----------
@@ -700,9 +738,88 @@ function closeSheet() {
 els.sheetClose.addEventListener('click', closeSheet);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
+// ---------- road-trip bingo ----------
+
+async function openBingo() {
+  showSheet('bingo', '<article class="detail"><div class="lbl">Road-trip bingo</div><p class="predict">Dealing today\'s card…</p></article>');
+  const c = map.getCenter();
+  const place = await placeName(state.fix?.lat ?? c.lat, state.fix?.lon ?? c.lng).catch(() => null);
+  const card = await bingoCard(place?.st);
+  if (state.sheet !== 'bingo') return;
+  showSheet('bingo', `<article class="detail"><div class="lbl">🎯 Road-trip bingo</div>${bingoHtml(card)}
+    <div class="sheet-actions"><button class="primary" data-act="sharebingo">✨ Share my card</button><button class="ghost" data-act="menu">Back</button></div></article>`);
+}
+
+// ---------- guess the crop ----------
+
+let guess = null, streak = 0;
+async function openGuess() {
+  showSheet('guess', `<article class="detail"><div class="lbl">🧩 Guess the crop</div>
+    <div class="sat sat-loading"><span>🛰️ Finding a field…</span></div></article>`);
+  try {
+    guess = await guessRound(map.getZoom() >= 9 ? map.getCenter() : null);
+  } catch (err) {
+    if (state.sheet === 'guess') showSheet('guess', `<article class="detail"><div class="lbl">🧩 Guess the crop</div><p class="err">${esc(err.message)}</p><div class="sheet-actions"><button class="primary" data-act="guess">Try again</button><button class="ghost" data-act="menu">Back</button></div></article>`);
+    return;
+  }
+  if (state.sheet !== 'guess') return;
+  showSheet('guess', `<article class="detail"><div class="lbl">🧩 Guess the crop</div>
+    <div class="guess-score"><span>🔥 Streak <b>${streak}</b></span><span>🏆 Best <b>${stats.guessBest}</b></span></div>
+    ${satelliteHtml(guess.lat, guess.lon)}
+    <p class="predict">What's growing in the circle?</p>
+    <div class="choices">${guess.choices.map((c) => `<button data-act="guessed" data-code="${c}" style="--c:${cropColor(c)}"><span>${cropEmoji(c)}</span>${esc(prettyName(c))}</button>`).join('')}</div>
+  </article>`);
+}
+
+function answerGuess(code, btn) {
+  if (!guess || guess.done) return;
+  guess.done = true;
+  const right = code === guess.code;
+  streak = right ? streak + 1 : 0;
+  if (right) { stats.guessRight++; stats.guessBest = Math.max(stats.guessBest, streak); }
+  saveStats();
+  fx(right ? 'right' : 'wrong');
+  btn.parentElement.querySelectorAll('button').forEach((x) => {
+    x.disabled = true;
+    if (+x.dataset.code === guess.code) x.classList.add('right');
+    else if (x === btn) x.classList.add('wrong');
+  });
+  const blurb = cropBlurb(guess.code);
+  btn.closest('.detail').insertAdjacentHTML('beforeend', `<div class="guess-result ${right ? 'yes' : 'no'}">
+      <b>${right ? (streak >= 3 ? `🔥 ${streak} in a row!` : '✅ Nailed it!') : `❌ It's ${cropEmoji(guess.code)} ${esc(prettyName(guess.code))}`}</b>
+      ${blurb ? `<p>${esc(blurb)}</p>` : ''}</div>
+    <div class="sheet-actions"><button class="primary" data-act="guess">Next field ▶</button><button class="ghost" data-act="zoomto" data-lat="${guess.lat}" data-lng="${guess.lon}" data-z="15">✈️ Go see it</button></div>`);
+  if (right && [3, 5, 10].includes(streak)) kernel(`${streak} in a row! You really know your crops. 🧠`, { mood: 'excited' });
+  rewardBadges();
+}
+
+// ---------- crop of the day ----------
+
+async function openCropOfDay() {
+  const code = cropOfTheDay(), r = rarityOf(code), have = state.album.cards[code];
+  showSheet('cotd', `<article class="detail cotd" style="--c:${cropColor(code)}"><div class="lbl">⭐ Crop of the day</div>
+    <div class="crop"><span class="big-emo" style="--c:${cropColor(code)}">${cropEmoji(code)}</span><span class="crop-name">${esc(prettyName(code))}</span></div>
+    <div class="badges"><span class="badge soft" style="border-color:${r.color};color:${r.color}">${r.name}</span>
+    <span class="badge ${have ? 'agree' : 'soft'}">${have ? '✓ In your album' : 'Not in your album yet'}</span></div>
+    ${cropBlurb(code) ? `<p class="note">${esc(cropBlurb(code))}</p>` : ''}
+    <div id="cotdFacts"><p class="predict">Looking it up…</p></div></article>`);
+  const near = state.fix ? { lat: state.fix.lat, lng: state.fix.lon } : map.getZoom() >= 6 ? map.getCenter() : null;
+  const f = await cropFacts(code, near);
+  const el = $('cotdFacts');
+  if (!el) return;
+  const fmt = (a) => (a >= 1e6 ? `${(a / 1e6).toFixed(1)} million` : a >= 1e3 ? `${Math.round(a / 1e3).toLocaleString()} thousand` : String(a));
+  el.innerHTML = `<div class="stats">
+      ${f.total ? `<div><b>${fmt(f.total).replace(' million', 'M').replace(' thousand', 'k')}</b><span>acres in the U.S. this season</span></div>` : ''}
+      ${f.topState ? `<div><b>${esc(f.topState)}</b><span>grows the most</span></div>` : ''}
+    </div>
+    ${f.nearest ? `<p class="predict">📍 ${near ? 'Closest big patch' : 'Biggest patch'}: <b>${esc(f.nearest.name)}</b>${f.nearest.miles != null ? `, about ${f.nearest.miles} miles away` : ''}.</p>
+      <div class="sheet-actions"><button class="primary" data-act="zoomto" data-lat="${f.nearest.at[0]}" data-lng="${f.nearest.at[1]}" data-z="11">✈️ Go find it</button><button class="ghost" data-act="menu">Back</button></div>` : ''}`;
+}
+
 // ---------- famous farm regions ----------
 
 function openBelt(b) {
+  fx('pop');
   const c = CATEGORIES.find((x) => x.id === b.cat);
   const f = nextFact(b);
   belts.setActive(b.id);   // its pill wiggles while the card is open
@@ -719,6 +836,11 @@ function openBelt(b) {
 // ---------- tapping a state or county ----------
 
 function openRegion(level, p, at) {
+  fx('pop');
+  if (level === 'counties') countyFacts(p).then((facts) => {
+    const el = $('countyFacts');
+    if (el && facts.length) el.innerHTML = facts.map((f) => `<li>${f}</li>`).join('');
+  });
   const t = topCrop(p);
   const planted = p.top.filter(([c]) => isPlanted(c));
   const max = planted[0]?.[1] || 1;
@@ -735,6 +857,7 @@ function openRegion(level, p, at) {
     </div>
     <div class="tbars">${planted.slice(0, 6).map(([c, a]) => `<div class="tbar"><span class="emo-sm" style="--c:${cropColor(c)}">${cropEmoji(c)}</span>
       <span class="bname">${esc(prettyName(c))}</span><i><b style="width:${(a / max * 100).toFixed(1)}%;background:${cropColor(c)}"></b></i><span class="bval">${fmt(a)} ac</span></div>`).join('')}</div>
+    ${level === 'counties' ? '<ul class="cfacts" id="countyFacts"></ul>' : ''}
     <div class="sheet-actions"><button class="primary" data-act="zoomto" data-lat="${at.lat}" data-lng="${at.lng}" data-z="${level === 'states' ? 7 : 12}">Zoom in</button><button class="ghost" data-act="close">Close</button></div>
   </article>`);
 }
@@ -792,6 +915,7 @@ const pinIcon = L.divIcon({ className: 'tap-pin', iconSize: [16, 16], iconAnchor
 async function onMapTap(lat, lon) {
   if (state.mode === 'idle') enterExplore(null, true);
   const field = fields.fieldAt(lat, lon);
+  if (field) { fx('pop'); stats.fieldsTapped++; saveStats(); rewardBadges(); }
   // Tapping outside any field while a panel is open just closes it.
   if (state.sheet && !field) return closeSheet();
 
@@ -865,8 +989,11 @@ function logTrip(res) {
       for (const s of sides) {
         const k = s.code ?? 'none';
         t.m[k] = (t.m[k] || 0) + d / sides.length;
+        if (s.code != null) addMiles(s.code, d / sides.length);
       }
       t.total += d;
+      stats.totalMiles += d / 1609.34;
+      saveStats();
     }
   }
   t.last = here;
@@ -917,11 +1044,19 @@ function openMenu() {
   const routes = loadRoutes();
   const t = state.trip;
   showSheet('menu', `<nav class="menu">
-    <button data-act="album"><b>🃏 Crop Cards</b><span>${albumSummary(state.album).got} cards · ${albumSummary(state.album).states} state stamps</span></button>
+    <button data-act="cotd"><b>⭐ Crop of the day</b><span>Today: ${cropEmoji(cropOfTheDay())} ${esc(prettyName(cropOfTheDay()))}</span></button>
+    <button data-act="bingo"><b>🎯 Road-trip bingo</b><span>Today's card · spot 3 in a row</span></button>
+    <button data-act="guess"><b>🧩 Guess the crop</b><span>Bird's-eye photo quiz${stats.guessBest ? ` · best streak ${stats.guessBest}` : ''}</span></button>
+    <button data-act="album"><b>🃏 Crop Cards & badges</b><span>${albumSummary(state.album).got} cards · ${albumSummary(state.album).states} state stamps</span></button>
     <button data-act="trip"><b>Trip log</b><span>${t.total >= 50 ? `${miles(t.total)} mi so far` : 'Miles of each crop along your drive'}</span></button>
     <button data-act="offline"><b>🧭 Plan a drive</b><span>What you'll pass on the way · save for offline</span></button>
     <button data-act="routes"><b>Saved routes</b><span>${routes.length ? `${routes.length} saved` : 'None yet'}</span></button>
     <button data-act="about"><b>About the data</b><span>Where each reading comes from</span></button>
+    <div class="toggles">
+      <button data-act="tog" data-k="sound" class="${settings.sound ? 'on' : ''}">🔊 Sounds</button>
+      <button data-act="tog" data-k="buzz" class="${settings.buzz ? 'on' : ''}">📳 Buzz</button>
+      <button data-act="tog" data-k="mascot" class="${settings.mascot ? 'on' : ''}">🌽 Kernel</button>
+    </div>
   </nav>`);
 }
 els.menuBtn.addEventListener('click', () => (state.sheet === 'menu' ? closeSheet() : openMenu()));
@@ -1029,6 +1164,15 @@ els.sheetBody.addEventListener('click', async (e) => {
   if (!b) return;
   const act = b.dataset.act;
   if (act === 'trip') openTrip();
+  else if (act === 'tog') {
+    settings.set(b.dataset.k, !settings[b.dataset.k]);
+    b.classList.toggle('on', settings[b.dataset.k]);
+    if (settings[b.dataset.k]) { fx('pop'); if (b.dataset.k === 'mascot') kernel('Hi again! 👋'); }
+  }
+  else if (act === 'bingo') openBingo();
+  else if (act === 'guess') openGuess();
+  else if (act === 'guessed') answerGuess(+b.dataset.code, b);
+  else if (act === 'cotd') openCropOfDay();
   else if (act === 'album') openAlbum();
   else if (act === 'sharealbum') {
     const cv = await albumCard(state.album);
@@ -1040,11 +1184,17 @@ els.sheetBody.addEventListener('click', async (e) => {
   else if (act === 'routes') openRoutes();
   else if (act === 'about') { closeSheet(); els.about.showModal(); }
   else if (act === 'close') closeSheet();
+  else if (act === 'sharebingo') {
+    const t = `🎯 My FieldSight road-trip bingo card today. Can you spot them all? 🌽🫘🌾`;
+    if (navigator.share) navigator.share({ title: 'FieldSight bingo', text: t, url: location.origin + location.pathname }).catch(() => {});
+    else { navigator.clipboard?.writeText(`${t} ${location.origin}${location.pathname}`); toast('Copied to clipboard'); }
+  }
   else if (act === 'beltspot') { closeSheet(); spotlight(+b.dataset.code); }
   else if (act === 'morefact') {
     const belt = BELTS.find((x) => x.id === b.dataset.id), f = nextFact(belt), el = $('beltFact');
     el.classList.remove('flip'); void el.offsetWidth; el.classList.add('flip');
     el.textContent = f.text;
+    fx('flip');
     $('factCount').textContent = `Fact ${f.n} of ${f.of}`;
   }
   else if (act === 'share') openShareCard();
@@ -1118,6 +1268,11 @@ function leaveWelcome() {
 
 function startDriving() {
   state.mode = 'drive';
+  const hr = new Date().getHours();
+  if (hr >= 21) stats.nightDrive = true;
+  if (hr < 6) stats.earlyDrive = true;
+  saveStats();
+  seasons?.update();
   document.body.classList.add('driving');
   leaveWelcome();
   keepAwake();
@@ -1176,6 +1331,14 @@ document.body.classList.add('welcoming');
   // A different fun fact on the welcome card each visit.
   const f = randomFact();
   $('didYouKnow').innerHTML = `<b>${f.belt.emoji} Did you know?</b> ${esc(f.text)}`;
+  const [, sn] = season(), cotd = cropOfTheDay();
+  $('welcomeChips').innerHTML = `<button class="wchip" data-w="cotd">⭐ Crop of the day: ${cropEmoji(cotd)} ${esc(prettyName(cotd))}</button><span class="wchip plain">${sn.emoji} ${sn.name}</span>`;
+  $('welcomeChips').addEventListener('click', (e) => { if (e.target.closest('[data-w=cotd]')) { enterExplore(null, true); openCropOfDay(); } });
+  // Kernel says hi once a day.
+  if (localGet('fs.kernelDay') !== new Date().toDateString()) {
+    localSet('fs.kernelDay', new Date().toDateString());
+    setTimeout(() => kernel(`Hi, I'm <b>Kernel</b>! 🌽 It's ${sn.name.toLowerCase()}. Tap a glowing region for fun facts, or try today's bingo in the ☰ menu.`, { ms: 8000 }), 1400);
+  }
 }
 els.headBtn.setAttribute('aria-pressed', String(state.headingUp));
 els.startBtn.addEventListener('click', startDriving);

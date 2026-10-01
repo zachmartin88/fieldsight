@@ -3,13 +3,13 @@
 //  - Crop tiles (the fixed 0.01° lookup tiles): cache-first. They never change, so anything fetched
 //    while driving is kept (recent cache, trimmed), and routes saved for offline live in their own
 //    cache until deleted.
-const SHELL = 'fs-shell-v9';
+const SHELL = 'fs-shell-v10';
 const RECENT = 'fs-tiles-recent';
 const SAVED = 'fs-tiles-saved';
 const RECENT_MAX = 5000;
 
 const SHELL_FILES = [
-  './', 'index.html', 'style.css', 'app.js', 'data.js', 'fields.js', 'offline.js', 'cdl-classes.js', 'palette.js', 'regions.js', 'share.js', 'album.js', 'ahead.js', 'parcels.js', 'belts.js', 'data/states.json',
+  './', 'index.html', 'style.css', 'app.js', 'data.js', 'fields.js', 'offline.js', 'cdl-classes.js', 'palette.js', 'regions.js', 'share.js', 'album.js', 'ahead.js', 'parcels.js', 'belts.js', 'fun.js', 'games.js', 'season.js', 'data/states.json',
   'config.js', 'icon.svg', 'manifest.webmanifest',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js',
