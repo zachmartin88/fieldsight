@@ -89,6 +89,18 @@ async function wms(service, params) {
   };
 }
 
+// USDA Crop Sequence Boundaries (official field outlines). Only query parameters are forwarded.
+const CSB_URL = 'https://pdi.scinet.usda.gov/hosting/rest/services/Hosted/Crop_Sequence_Boundaries_2024/FeatureServer/2/query';
+const CSB_PARAMS = ['where', 'geometry', 'geometryType', 'inSR', 'spatialRel', 'outFields', 'outSR', 'f', 'resultOffset', 'resultRecordCount', 'geometryPrecision', 'maxAllowableOffset'];
+
+async function csb(params) {
+  const q = new URLSearchParams();
+  for (const k of CSB_PARAMS) if (params.has(k)) q.set(k, params.get(k));
+  const key = `csb?${q}`;
+  const e = await cached(key, 7 * 86400e3, () => upstream(`${CSB_URL}?${q}`));
+  return { status: e.status, type: e.type, body: e.body, headers: { 'Cache-Control': e.status === 200 ? 'public, max-age=86400' : 'no-store' } };
+}
+
 // CDL code -> Quick Stats commodity (and class for wheat).
 const COMMODITY = {
   1: ['CORN'], 5: ['SOYBEANS'], 2: ['COTTON'], 3: ['RICE'], 4: ['SORGHUM'], 21: ['BARLEY'], 28: ['OATS'],
@@ -163,6 +175,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/health') out = json(200, { ok: true, cachedMB: +(cache.bytes / 1048576).toFixed(1), progress: !!QUICKSTATS_KEY });
     else if (m) out = await wms(m[1], url.searchParams);
     else if (url.pathname === '/progress') out = await progress(url.searchParams);
+    else if (url.pathname === '/csb') out = await csb(url.searchParams);
     else out = json(404, { error: 'not found' });
   } catch (err) {
     out = json(502, { error: 'upstream failed', detail: String(err.message || err) });

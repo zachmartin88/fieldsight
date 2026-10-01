@@ -136,11 +136,11 @@ body.welcoming .map-ctl, body.sheet-open .map-ctl, body.sheet-open .recenter { d
 .recenter svg .solid { fill: var(--gold); }
 .map-hint {
   position: fixed; z-index: 900; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--safe-bottom) + var(--gutter) + 76px);
+  top: calc(var(--safe-top) + var(--gutter) + 62px);
   background: var(--glass); border: 1px solid var(--line-soft); color: #c4c9d2;
   font-size: 12.5px; padding: 7px 12px; border-radius: 999px; white-space: nowrap; pointer-events: none;
 }
-body.welcoming .map-hint, body.sheet-open .map-hint { display: none; }
+body.welcoming .map-hint, body.sheet-open .map-hint, body.driving .map-hint { display: none; }
 
 .leaflet-control-attribution { background: rgba(13,15,18,.7) !important; color: #6f7784 !important; font-size: 9.5px; }
 .leaflet-control-attribution a { color: #9aa1ab !important; }
@@ -373,3 +373,18 @@ body.loading .loadbar {
   background: rgba(255,255,255,.045); border: 1.5px solid var(--c);
 }
 .spotted i { font-style: normal; font-size: 12px; font-weight: 700; }
+
+/* ================= zoomed-out bubbles ================= */
+.region-bubble {
+  position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  padding: 3px 9px 3px 3px; border-radius: 999px; font-size: 12.5px; font-weight: 800; color: #fff;
+  background: rgba(12, 14, 18, 0.88); border: 1.5px solid var(--c); box-shadow: 0 3px 10px rgba(0,0,0,.5);
+  font-variant-numeric: tabular-nums; transition: transform .12s;
+}
+.region-bubble:hover { transform: translate(-50%, -50%) scale(1.08); }
+.region-bubble i { font-style: normal; font-weight: 800; font-size: 11px; letter-spacing: .04em; color: #cfd3da; padding: 0 3px 0 6px; }
+.region-bubble .emo { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--c); font-size: 12px; }
+.emo-sm { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--c); font-size: 12px; }
+.tbar:has(.emo-sm) { grid-template-columns: 20px 108px 1fr 62px; }
+.region-bubble.compact { padding: 3px; }

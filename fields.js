@@ -7,10 +7,11 @@
 //
 // CropTiles (zoomed out): the same map as tiles, recolored into FieldSight's palette so colors match
 // at every zoom.
-import { rgbToCode, isAg, prettyName, wmsFetch } from './data.js';
+import { rgbToCode, isAg, prettyName, wmsFetch, proxyUrl } from './data.js';
 import { cropColor, cropEmoji, cropLabel } from './palette.js';
 
 export const FIELD_MIN_ZOOM = 12;
+export const CSB_MIN_ZOOM = 13;   // official USDA field outlines from here in
 const METERS_PER_PX = 7;   // request resolution; source data is 10-30 m
 const MAX_PX = 900;
 const MIN_FIELD_PX = 5;    // ignore specks smaller than this (about a quarter acre)
@@ -85,6 +86,108 @@ function recolor(r, g, b, a) {
     recolorCache.set(k, v);
   }
   return v;
+}
+
+// ---------- official USDA field boundaries (Crop Sequence Boundaries) ----------
+// Each field polygon carries its acreage and the crop grown each year from the USDA crop maps.
+// The national service is tried first; state copies cover for it when it's down.
+const CSB_SOURCES = [
+  { name: 'USDA', url: 'https://pdi.scinet.usda.gov/hosting/rest/services/Hosted/Crop_Sequence_Boundaries_2024/FeatureServer/2', bbox: [-125, 24, -66, 50] },
+  { name: 'Minnesota', url: 'https://services3.arcgis.com/g6eV2CrSSwCZj8Mc/arcgis/rest/services/NASS_Crop_Sequence_Boundaries_2024/FeatureServer/0', bbox: [-97.3, 43.4, -90.2, 49.4] },
+];
+const csbDownUntil = new Map();
+
+async function fetchCSB(minx, miny, maxx, maxy, tol) {
+  for (const src of CSB_SOURCES) {
+    const [bx0, by0, bx1, by1] = src.bbox;
+    if (maxx < bx0 || minx > bx1 || maxy < by0 || miny > by1) continue;
+    if ((csbDownUntil.get(src.url) || 0) > Date.now()) continue;
+    try {
+      const feats = [];
+      for (let page = 0; page < 3; page++) {
+        const q = new URLSearchParams({
+          where: '1=1', geometry: `${minx},${miny},${maxx},${maxy}`, geometryType: 'esriGeometryEnvelope', inSR: '4326',
+          spatialRel: 'esriSpatialRelIntersects', outFields: '*', outSR: '4326', f: 'geojson',
+          resultOffset: String(page * 2000), resultRecordCount: '2000', geometryPrecision: '6', maxAllowableOffset: String(tol),
+        });
+        const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 9000);
+        // The national service doesn't send browser (CORS) headers on errors; the proxy relays it.
+        const url = src.name === 'USDA' && proxyUrl ? `${proxyUrl}/csb?${q}` : `${src.url}/query?${q}`;
+        const res = await fetch(url, { signal: ctl.signal }).finally(() => clearTimeout(timer));
+        if (!res.ok) throw new Error(res.status);
+        const j = await res.json();
+        if (j.error || !j.features) throw new Error('bad response');
+        feats.push(...j.features);
+        if (!(j.exceededTransferLimit || j.properties?.exceededTransferLimit) && j.features.length < 2000) break;
+      }
+      return { source: src.name, features: feats };
+    } catch {
+      csbDownUntil.set(src.url, Date.now() + 10 * 60e3);
+    }
+  }
+  return null;
+}
+
+// Year-by-year crop codes from a CSB feature's CDLyyyy attributes.
+function csbHistory(props) {
+  return Object.entries(props)
+    .map(([k, v]) => [k.match(/^cdl(\d{4})$/i)?.[1], v])
+    .filter(([y, v]) => y && v != null && +v > 0)
+    .map(([y, v]) => ({ year: +y, code: +v }))
+    .sort((a, b) => a.year - b.year);
+}
+
+// Use USDA field outlines where they exist; keep traced shapes for land they don't cover (pasture,
+// new fields). Returns a per-pixel owner map and the list of fields, like components().
+function mergeCSB(csb, comp, comps, codes, W, H, minx, miny, maxx, maxy) {
+  const owner = new Int32Array(W * H).fill(-1);
+  const fields = [];
+  const toX = (lng) => (lng - minx) / (maxx - minx) * W, toY = (lat) => (maxy - lat) / (maxy - miny) * H;
+  for (const f of csb.features) {
+    const g = f.geometry;
+    if (!g) continue;
+    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
+    const id = fields.length, counts = new Map();
+    let n = 0;
+    for (const rings of polys) {
+      let ymin = Infinity, ymax = -Infinity;
+      for (const r of rings) for (const [, lat] of r) { const y = toY(lat); ymin = Math.min(ymin, y); ymax = Math.max(ymax, y); }
+      for (let row = Math.max(0, Math.floor(ymin)); row <= Math.min(H - 1, Math.ceil(ymax)); row++) {
+        const yc = row + 0.5, xs = [];
+        for (const r of rings) for (let i = 0, j = r.length - 1; i < r.length; j = i++) {
+          const yi = toY(r[i][1]), yj = toY(r[j][1]);
+          if ((yi > yc) !== (yj > yc)) { const xi = toX(r[i][0]), xj = toX(r[j][0]); xs.push(xi + (yc - yi) / (yj - yi) * (xj - xi)); }
+        }
+        xs.sort((a, b) => a - b);
+        for (let k = 0; k + 1 < xs.length; k += 2) {
+          for (let col = Math.max(0, Math.ceil(xs[k] - 0.5)); col <= Math.min(W - 1, Math.floor(xs[k + 1] - 0.5)); col++) {
+            const i = row * W + col;
+            owner[i] = id; n++;
+            if (codes[i]) counts.set(codes[i], (counts.get(codes[i]) || 0) + 1);
+          }
+        }
+      }
+    }
+    const history = csbHistory(f.properties);
+    // This season's crop: what the live map shows inside the field; else the latest USDA year.
+    let code = null, best = 0, ag = 0;
+    for (const [c, k] of counts) { ag += k; if (k > best) { best = k; code = c; } }
+    if (!code || ag < n * 0.3) code = history.at(-1)?.code ?? null;
+    if (!code || !isAg(code)) continue;
+    fields.push({
+      code, count: n, src: 'usda', history, acres: +f.properties.CSBACRES || +f.properties.csbacres || null,
+      rings: polys.flatMap((rings) => rings.map((r) => r.map(([lng, lat]) => [lat, lng]))),
+    });
+  }
+  // Traced shapes for farmland the USDA layer doesn't cover.
+  const covered = new Int32Array(comps.length);
+  for (let i = 0; i < W * H; i++) if (comp[i] >= 0 && owner[i] >= 0) covered[comp[i]]++;
+  const remap = new Int32Array(comps.length).fill(-1);
+  comps.forEach((c, k) => {
+    if (c.count >= MIN_FIELD_PX && covered[k] / c.count < 0.3) { remap[k] = fields.length; fields.push({ ...c, src: 'traced' }); }
+  });
+  for (let i = 0; i < W * H; i++) if (owner[i] < 0 && comp[i] >= 0 && remap[comp[i]] >= 0) owner[i] = remap[comp[i]];
+  return { comp: owner, comps: fields };
 }
 
 // ---------- zoomed-in fields ----------
@@ -213,12 +316,21 @@ export class FieldLayer {
         codes[i] = c != null && isAg(c) ? c : 0;   // only farmland becomes fields
       }
       despeckle(codes, W, H);
-      const { comp, comps } = components(codes, W, H);
-      const depth = distanceToEdge(comp, W, H);
+      let { comp, comps } = components(codes, W, H);
       traceOutlines(comp, comps, W, H);
+      let fieldSource = 'traced';
+      if (this.map.getZoom() >= CSB_MIN_ZOOM) {
+        const csb = await fetchCSB(minx, miny, maxx, maxy, ((maxx - minx) / W) * 0.5);
+        if (id !== this.req) return;
+        if (csb?.features.length) {
+          ({ comp, comps } = mergeCSB(csb, comp, comps, codes, W, H, minx, miny, maxx, maxy));
+          fieldSource = csb.source;
+        }
+      }
+      const depth = distanceToEdge(comp, W, H);
 
       const prev = this.selected != null && this.grid ? this.grid.selPoint : null;
-      this.grid = { minx, maxx, miny, maxy, W, H, codes, comp, comps, depth, zoom: this.map.getZoom() };
+      this.grid = { minx, maxx, miny, maxy, W, H, codes, comp, comps, depth, fieldSource, zoom: this.map.getZoom() };
       this.hovered = null;
       this.build();
       // Keep the selection across refetches.
@@ -240,12 +352,13 @@ export class FieldLayer {
     const group = L.layerGroup();
     this.polys = polys;
     g.comps.forEach((c, id) => {
-      if (c.count < MIN_FIELD_PX || !c.loops.length) return;
-      const rings = c.loops.map((loop) => {
+      if (c.count < MIN_FIELD_PX && !c.rings) return;
+      const rings = c.rings || c.loops.map((loop) => {
         const ring = [];
         for (let i = 0; i < loop.length; i += 2) ring.push(toLL(loop[i], loop[i + 1]));
         return ring;
       });
+      if (!rings.length) return;
       const p = L.polygon(rings, { renderer: this.renderer, interactive: false, smoothFactor: 0.6, ...this.styleFor(id, c) });
       polys[id] = p;
       group.addLayer(p);
@@ -360,7 +473,10 @@ export class FieldLayer {
     const id = this.hitIndex(lat, lng);
     if (id == null) return null;
     const c = this.grid.comps[id];
-    return { id, code: c.code, acres: Math.max(1, Math.round(c.count * this.pxAcres())) };
+    return {
+      id, code: c.code, src: c.src || 'traced', history: c.history || null,
+      acres: Math.max(1, Math.round(c.acres || c.count * this.pxAcres())),
+    };
   }
 
   select(id, at = null) {

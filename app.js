@@ -3,6 +3,7 @@ import {
   wakeProxy, proxyUrl,
 } from './data.js';
 import { FieldLayer, CropTiles, FIELD_MIN_ZOOM } from './fields.js';
+import { RegionLayer, COUNTY_MAX_ZOOM, topCrop, isPlanted } from './regions.js';
 import { cropColor, cropEmoji, shortName, TYPICAL_YIELD } from './palette.js';
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
 
@@ -80,23 +81,30 @@ els.baseBtn.addEventListener('click', () => setBase(base === 'dark' ? 'satellite
 map.attributionControl.addAttribution('Crops: USDA NASS, GMU CSISS');
 
 // Crops: pixel tiles when zoomed out, outlined + labeled fields when zoomed in.
+// Keep map labels out from under the top bar, bottom panels and the map buttons.
+function mapInsets() {
+  const top = document.querySelector('.hud').getBoundingClientRect().bottom;
+  const panels = [els.sheet, els.welcome, els.legend].filter((e) => !e.hidden && e.offsetParent)
+    .map((e) => e.getBoundingClientRect()).filter((r) => r.width > window.innerWidth * 0.9);
+  return { top, bottom: Math.max(76, ...panels.map((r) => window.innerHeight - r.top)) };
+}
+
 fields = new FieldLayer(map, {
   pane: 'fields', labelPane: 'markerPane',
   onLoading: (on) => {
     document.body.classList.toggle('loading', on);
     if (state.mode !== 'drive') setStatus(on ? 'Loading fields…' : 'Ready', on ? 'busy' : '');
   },
-  onStats: (stats) => renderLegend(stats),
-  // Keep labels out from under the top bar and a bottom panel.
-  insets: () => {
-    const top = document.querySelector('.hud').getBoundingClientRect().bottom;
-    const panels = [els.sheet, els.welcome, els.legend].filter((e) => !e.hidden && e.offsetParent)
-      .map((e) => e.getBoundingClientRect()).filter((r) => r.width > window.innerWidth * 0.9);
-    // Always leave room for the map buttons along the bottom.
-    return { top, bottom: Math.max(76, ...panels.map((r) => window.innerHeight - r.top)) };
-  },
+  // Only the layer that's showing drives the legend (fields here, regions when zoomed out).
+  onStats: (stats) => { if (map.getZoom() >= FIELD_MIN_ZOOM) renderLegend(stats); },
+  insets: mapInsets,
 });
 fields.setSolid(base === 'dark');
+const regions = new RegionLayer(map, {
+  pane: 'fields', insets: mapInsets,
+  onTap: (level, p, at) => openRegion(level, p, at),
+  onUpdate: () => { if (map.getZoom() < FIELD_MIN_ZOOM) renderLegend(regions.statsInView()); },
+});
 const crop = { which: localGet('fs.layer') || 'live', tiles: null };
 
 function cropSource(which) {
@@ -117,14 +125,17 @@ function setCrop(which) {
     fields.setSource(src);
   }
   fields.setEnabled(!!src);
+  regions.setEnabled(!!src);
   syncCropZoom();
 }
-// Pixel tiles only below the field zoom; the field layer takes over above it.
+// Zoom tiers: state/county summaries (≤10), crop-colored detail (11), individual fields (≥12).
 function syncCropZoom() {
-  const zoomedOut = map.getZoom() < FIELD_MIN_ZOOM;
-  if (crop.tiles) (zoomedOut ? crop.tiles.addTo(map) : map.removeLayer(crop.tiles));
-  els.mapHint.hidden = !(zoomedOut && crop.which !== 'none');
-  if (zoomedOut) renderLegend(null);
+  const z = map.getZoom();
+  const detail = z > COUNTY_MAX_ZOOM && z < FIELD_MIN_ZOOM;
+  if (crop.tiles) (detail ? crop.tiles.addTo(map) : map.removeLayer(crop.tiles));
+  els.mapHint.hidden = !(z < FIELD_MIN_ZOOM && crop.which !== 'none');
+  els.mapHint.textContent = z <= COUNTY_MAX_ZOOM ? 'Tap a state or county · zoom in for fields' : 'Zoom in a little more for fields';
+  if (z < FIELD_MIN_ZOOM) renderLegend(regions.statsInView());
 }
 
 // ---------- "in view" legend: crops on screen; tap one to spotlight it ----------
@@ -132,7 +143,7 @@ function syncCropZoom() {
 function renderLegend(stats) {
   if (!stats || !stats.length || crop.which === 'none') {
     els.legend.hidden = true;
-    if (state.focus != null) { state.focus = null; fields.setFocus(null); }
+    if (state.focus != null) { state.focus = null; fields.setFocus(null); regions.setFocus(null); }
     return;
   }
   const total = stats.reduce((t, r) => t + r.acres, 0);
@@ -151,8 +162,10 @@ els.legend.addEventListener('click', (e) => {
   const code = +b.dataset.code;
   state.focus = state.focus === code ? null : code;
   fields.setFocus(state.focus);
+  regions.setFocus(state.focus);
+  b.parentElement.querySelectorAll('button').forEach((x) => x.classList.toggle('on', +x.dataset.code === state.focus));
 });
-map.on('zoomend', syncCropZoom);
+map.on('zoomend moveend', syncCropZoom);
 els.layerToggle.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (b) setCrop(b.dataset.layer);
@@ -424,7 +437,7 @@ function rotationSummary(history) {
   return `${kinds.length} different crops in ${c.length} years`;
 }
 
-function detail(sideKey, s, layers, { stats = [], lat, lon } = {}) {
+function detail(sideKey, s, layers, { stats = [], lat, lon, field = null } = {}) {
   const liveLabel = layers.live?.label;
   const outside = s.code == null && !s.live && s.history.every((h) => h.code == null);
   const name = s.code != null ? prettyName(s.code) : outside ? 'Not mapped' : 'No data here';
@@ -470,15 +483,22 @@ function detail(sideKey, s, layers, { stats = [], lat, lon } = {}) {
   // Crop history: one tile per season, this season last (live reading, or the prediction).
   const nowYear = layers.live?.year ?? (layers.years[0] + 1);
   const nowCode = s.live ? s.live.code : s.prediction?.code ?? null;
+  // USDA field outlines carry the field's own record (up to 8 years); otherwise use the map history.
+  let record = s.history;
+  if (field?.history?.length) {
+    const last = field.history.at(-1).year;
+    record = [...field.history, ...s.history.filter((h) => h.year > last)].filter((h) => h.year < nowYear);
+  }
   const seasons = [
-    ...s.history.map((h) => ({ year: h.year, code: h.code, kind: '' })),
+    ...record.slice(-5).map((h) => ({ year: h.year, code: h.code, kind: '' })),
     { year: nowYear, code: nowCode, kind: s.live ? 'now live' : 'now guess' },
   ];
   const tiles = seasons.map((x) => `<div class="season ${x.kind}" style="--c:${cropColor(x.code)}" title="${x.year}: ${x.code != null ? esc(prettyName(x.code)) : 'no data'}">
       <span class="yr">${x.kind ? (s.live ? 'Now' : 'Next?') : `’${String(x.year).slice(2)}`}</span>
       <b>${x.code != null ? cropEmoji(x.code) || '•' : '–'}</b>
       <span class="nm">${x.code != null ? esc(shortName(x.code)) : 'No data'}</span></div>`).join('');
-  const rot = rotationSummary(s.history);
+  const rot = rotationSummary(record);
+  if (field?.src === 'usda') badges.push(`<span class="badge soft">USDA field · ${record.length} yr record</span>`);
 
   return `<article class="detail">
       <div class="lbl">${SIDE_NAME[sideKey]}</div>
@@ -524,6 +544,29 @@ function closeSheet() {
 els.sheetClose.addEventListener('click', closeSheet);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
 
+// ---------- tapping a state or county ----------
+
+function openRegion(level, p, at) {
+  const t = topCrop(p);
+  const planted = p.top.filter(([c]) => isPlanted(c));
+  const max = planted[0]?.[1] || 1;
+  const fmt = (a) => (a >= 1e6 ? `${(a / 1e6).toFixed(1)}M` : a >= 1e3 ? `${Math.round(a / 1e3)}k` : String(a));
+  const name = level === 'states' ? p.name : `${p.name} County, ${p.st}`;
+  const live = state.layers?.live?.label;
+  showSheet('region', `<article class="detail">
+    <div class="lbl">${level === 'states' ? 'State' : 'County'} · ${live ? `${esc(live)} live map` : 'USDA map'}</div>
+    <div class="crop"><span class="big-emo" style="--c:${cropColor(t?.code)}">${t ? cropEmoji(t.code) : '🗺️'}</span><span class="crop-name">${esc(name)}</span></div>
+    <div class="stats">
+      <div><b>${fmt(p.crop)}</b><span>acres planted</span></div>
+      <div><b>${Math.round(p.crop / p.area * 100)}%</b><span>of the land is cropland</span></div>
+      ${t ? `<div><b>${Math.round(t.share * 100)}%</b><span>of it is ${esc(prettyName(t.code).toLowerCase())}</span></div>` : ''}
+    </div>
+    <div class="tbars">${planted.slice(0, 6).map(([c, a]) => `<div class="tbar"><span class="emo-sm" style="--c:${cropColor(c)}">${cropEmoji(c)}</span>
+      <span class="bname">${esc(prettyName(c))}</span><i><b style="width:${(a / max * 100).toFixed(1)}%;background:${cropColor(c)}"></b></i><span class="bval">${fmt(a)} ac</span></div>`).join('')}</div>
+    <div class="sheet-actions"><button class="primary" data-act="zoomto" data-lat="${at.lat}" data-lng="${at.lng}" data-z="${level === 'states' ? 7 : 12}">Zoom in</button><button class="ghost" data-act="close">Close</button></div>
+  </article>`);
+}
+
 // ---------- tapping the map ----------
 
 const pinIcon = L.divIcon({ className: 'tap-pin', iconSize: [16, 16], iconAnchor: [8, 8] });
@@ -547,7 +590,7 @@ async function onMapTap(lat, lon) {
   try {
     const res = await lookup(lat, lon, { tapped: true });
     if (seq !== state.tapSeq) return;
-    showSheet('tap', detail('point', res.sides.point, res.layers, { stats: fieldStats(field, res.sides.point), lat, lon }));
+    showSheet('tap', detail('point', res.sides.point, res.layers, { stats: fieldStats(field, res.sides.point), lat, lon, field }));
   } catch (err) {
     if (seq !== state.tapSeq) return;
     showSheet('tap', `<article class="detail"><div class="lbl">This spot</div><p class="err">${esc(err.message)}. Try again in a moment.</p></article>`);
@@ -722,6 +765,8 @@ els.sheetBody.addEventListener('click', async (e) => {
   else if (act === 'offline') openOffline();
   else if (act === 'routes') openRoutes();
   else if (act === 'about') { closeSheet(); els.about.showModal(); }
+  else if (act === 'close') closeSheet();
+  else if (act === 'zoomto') { closeSheet(); map.setView([+b.dataset.lat, +b.dataset.lng], +b.dataset.z); }
   else if (act === 'newtrip') { state.trip = { started: Date.now(), total: 0, m: {}, last: null }; saveTrip(); openTrip(); }
   else if (act === 'showroute') {
     const r = loadRoutes().find((x) => x.id === b.dataset.id);
