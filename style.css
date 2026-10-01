@@ -502,3 +502,5 @@ body.welcoming .key, body.sheet-open .key { display: none; }
 @media (min-width: 760px) { .key { bottom: auto; top: calc(var(--safe-top) + var(--gutter) + 72px); } }
 /* zoomed-out summaries are painted solid and faded as one layer (no seams between counties) */
 .leaflet-regions-pane { opacity: .62; }
+.key-note { margin: 6px 0 0; display: grid; gap: 4px; font-size: 11px; color: var(--muted); line-height: 1.35; }
+.key-note .ramp { display: block; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #3c3a33, #8a7340, #ffc53d); }

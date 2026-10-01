@@ -119,10 +119,12 @@ export class RegionLayer {
       const col = mixColor(catColor(fam), '#1b1e24', 1 - v);
       return v ? { ...(level === 'counties' ? { stroke: true, color: col, weight: 1, opacity: 1 } : line), fillColor: col, fillOpacity: 1 } : { ...line, fillOpacity: 0 };
     }
-    if (!t || farm < min) return { ...line, fillOpacity: 0 };
+    if (!t || farm < 0.005) return { ...line, fillOpacity: 0 };
+    // Every region gets its top crop's color; how deep the color is shows how much of the land is
+    // farmed (pale = a little farming, full color = farm country). Mixed counties are a touch muted.
     // Painted solid; the whole pane is see-through (CSS), so neighbours blend with no seams.
-    // Mixed counties (no clear leader) are a muted version of their top category.
-    const col = t.share < MIN_SHARE ? mixColor(catColor(t.code), '#1b1e24', 0.6) : catColor(t.code);
+    const strength = (0.3 + 0.7 * Math.sqrt(Math.min(1, farm / 0.55))) * (t.share < MIN_SHARE ? 0.8 : 1);
+    const col = mixColor(catColor(t.code), '#1b1e24', 1 - strength);
     const seam = level === 'counties' ? { stroke: true, color: col, weight: 1, opacity: 1 } : line;
     return { ...seam, fillColor: col, fillOpacity: 1 };
   }
@@ -146,7 +148,8 @@ export class RegionLayer {
         return a ? { code: fam, share: a / p.crop } : null;
       })() : topCrop(p);
       if (!t || t.share < (this.focus != null ? 0.05 : MIN_SHARE)) continue;
-      if (farmShare(p) < (MIN_CROPLAND[level] ?? 0.1)) continue;
+      // Every state gets a bubble; counties only where farming dominates (keeps the map calm).
+      if (level === 'counties' && farmShare(p) < MIN_CROPLAND.counties) continue;
       const pt = this.map.latLngToContainerPoint(p.at);
       const text = level === 'states' ? `${p.st}` : '';
       // Counties thin out when zoomed out: emoji only and well spaced at 8, percentages from 9.

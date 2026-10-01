@@ -50,7 +50,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 // ---------- map ----------
 
 const map = L.map('map', {
-  zoomControl: false, attributionControl: true, zoomSnap: 0.5,
+  zoomControl: false, attributionControl: true, zoomSnap: 1,
   rotate: true, bearing: 0, touchRotate: false, shiftKeyRotate: false, rotateControl: false, compassBearing: false,
 }).setView([39.5, -96.5], 5);
 map.attributionControl.setPrefix(false);
@@ -151,6 +151,7 @@ function syncCropZoom() {
 
 function renderKey() {
   $('keyBody').innerHTML = CATEGORIES.map((c) => `<div><i style="background:${c.color}"></i><span>${c.emoji}</span>${esc(c.name)}</div>`).join('');
+  $('keyBody').insertAdjacentHTML('beforeend', '<p class="key-note"><b class="ramp"></b>Deeper color = more of the land is farmed</p>');
 }
 function setKey(open) {
   $('key').classList.toggle('open', open);
