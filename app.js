@@ -6,6 +6,8 @@ import { FieldLayer, CropTiles, FIELD_MIN_ZOOM } from './fields.js';
 import { RegionLayer, COUNTY_MAX_ZOOM, topCrop, isPlanted } from './regions.js';
 import { cropColor, cropEmoji, shortName, TYPICAL_YIELD } from './palette.js';
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
+import { scanRoute, summarize, nearestStop } from './ahead.js';
+import { parcelAt } from './parcels.js';
 import { fieldCard, albumCard, shareCanvas, placeName, countyName } from './share.js';
 import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate } from './album.js';
 
@@ -34,6 +36,7 @@ const state = {
   voice: localGet('fs.voice') === '1',
   layers: null,
   focus: null,           // crop code spotlighted from the legend
+  harvest: {},           // crop code -> share harvested (USDA weekly report, via the proxy)
   trip: loadTrip(),
   album: loadAlbum(),
   lastPlaceAt: null,     // where we last looked up the county/state (for cards and stamps)
@@ -145,7 +148,9 @@ function syncCropZoom() {
 
 // ---------- "in view" legend: crops on screen; tap one to spotlight it ----------
 
+let lastLegendStats = null;
 function renderLegend(stats) {
+  lastLegendStats = stats;
   if (!stats || !stats.length || crop.which === 'none') {
     els.legend.hidden = true;
     if (state.focus != null) { state.focus = null; fields.setFocus(null); regions.setFocus(null); }
@@ -159,7 +164,31 @@ function renderLegend(stats) {
   // Labels were placed before the legend showed up; place them again clear of it.
   if (appeared) requestAnimationFrame(() => fields.relabel());
   els.legend.innerHTML = top.map((r) => `<button data-code="${r.code}" class="${r.code === state.focus ? 'on' : ''}" style="--c:${cropColor(r.code)}">
-      <span class="emo">${cropEmoji(r.code)}</span>${esc(prettyName(r.code))}<em>${r.acres ? `${Math.max(1, Math.round(r.acres / total * 100))}%` : ''}</em></button>`).join('');
+      <span class="emo">${cropEmoji(r.code)}</span>${esc(prettyName(r.code))}<em>${r.acres ? `${Math.max(1, Math.round(r.acres / total * 100))}%` : ''}</em>${state.harvest[r.code] != null ? `<s class="cut">${Math.round(state.harvest[r.code] * 100)}% harvested</s>` : ''}</button>`).join('');
+  updateHarvest(top.map((r) => r.code));
+}
+
+// Harvest progress (needs the proxy + USDA key): fields fade toward straw as the state's harvest of
+// that crop advances, and the legend says how far along it is.
+let harvestKey = '';
+async function updateHarvest(codes) {
+  if (!proxyUrl || map.getZoom() < 9) return;
+  const c = map.getCenter();
+  const want = codes.filter((code) => PROGRESS_CODES.has(code));
+  const key = `${c.lat.toFixed(0)}:${c.lng.toFixed(0)}:${want.join(',')}`;
+  if (key === harvestKey) return;
+  harvestKey = key;
+  const next = {};
+  await Promise.all(want.map(async (code) => {
+    const data = await getProgress(c.lat, c.lng, code);
+    const h = data?.progress.now.find((r) => r.what === 'harvested');
+    if (h) next[code] = h.pct / 100;
+  }));
+  if (harvestKey !== key) return;
+  const changed = JSON.stringify(next) !== JSON.stringify(state.harvest);
+  state.harvest = next;
+  fields.setHarvest(next);
+  if (changed && !els.legend.hidden) renderLegend(lastLegendStats);
 }
 els.legend.addEventListener('click', (e) => {
   const b = e.target.closest('button');
@@ -183,6 +212,8 @@ const meIcon = L.divIcon({
 let meMarker = null;
 const areaLayer = L.layerGroup().addTo(map);
 const routeLayer = L.layerGroup().addTo(map);
+const driveRouteLayer = L.layerGroup().addTo(map);   // the planned route while driving it
+const parcelLayer = L.layerGroup().addTo(map);
 let tapPin = null;
 
 map.on('dragstart', () => {
@@ -415,7 +446,20 @@ function renderStrip(res) {
       <div class="name"><span class="chipdot" style="--c:${cropColor(s.code)}">${cropEmoji(s.code) || '·'}</span><span>${esc(name)}</span></div>
       ${then}
     </div>`;
-  }).join('');
+  }).join('') + comingUp(res);
+}
+
+// With a planned route: the mix over the next ~10 miles.
+function comingUp(res) {
+  const scan = state.route?.plan?.scan;
+  if (!scan?.stops.length) return '';
+  const { index, offRouteKm } = nearestStop(scan.stops, res.lat, res.lon);
+  if (offRouteKm > 3) return '<div class="coming">Off your planned route</div>';
+  const n = Math.max(1, Math.round(16093 / scan.step));
+  const next = scan.stops.slice(index, index + n);
+  if (!next.length) return '<div class="coming">🏁 Almost there</div>';
+  const mix = summarize(next).filter((r) => r.code != null).slice(0, 3);
+  return `<div class="coming"><span>Next 10 mi</span>${mix.map((r) => `<b>${cropEmoji(r.code)} ${Math.round(r.share * 100)}%</b>`).join('')}</div>`;
 }
 
 function renderStripMessage(text, pending = true) {
@@ -448,17 +492,21 @@ function progressSlot(lat, lon, code) {
   return `<div class="progress" data-lat="${lat}" data-lon="${lon}" data-crop="${code}"></div>`;
 }
 
+function getProgress(lat, lon, code) {
+  const key = `${code}:${(+lat).toFixed(0)}:${(+lon).toFixed(0)}`;
+  let p = progressCache.get(key);
+  if (!p) {
+    p = fetch(`${proxyUrl}/progress?lat=${lat}&lon=${lon}&crop=${code}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    progressCache.set(key, p);
+  }
+  return p;
+}
+
 async function fillProgress() {
   for (const el of els.sheetBody.querySelectorAll('.progress:not([data-done])')) {
     el.dataset.done = '1';
     const { lat, lon, crop: code } = el.dataset;
-    const key = `${code}:${(+lat).toFixed(0)}:${(+lon).toFixed(0)}`;
-    let p = progressCache.get(key);
-    if (!p) {
-      p = fetch(`${proxyUrl}/progress?lat=${lat}&lon=${lon}&crop=${code}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      progressCache.set(key, p);
-    }
-    const data = await p;
+    const data = await getProgress(lat, lon, code);
     if (!data || !el.isConnected) continue;
     const prev = Object.fromEntries((data.progress.prev || []).map((r) => [r.what, r.pct]));
     const rows = data.progress.now.map((r) => {
@@ -585,6 +633,7 @@ function closeSheet() {
   document.body.classList.remove('sheet-open');
   if (tapPin) { map.removeLayer(tapPin); tapPin = null; }
   routeLayer.clearLayers();
+  parcelLayer.clearLayers();
   fields.select(null);
   fields.relabel();
   if (wasTap && state.mode === 'drive' && state.fix) { state.following = true; els.recenter.hidden = true; follow(true); }
@@ -613,6 +662,36 @@ function openRegion(level, p, at) {
       <span class="bname">${esc(prettyName(c))}</span><i><b style="width:${(a / max * 100).toFixed(1)}%;background:${cropColor(c)}"></b></i><span class="bval">${fmt(a)} ac</span></div>`).join('')}</div>
     <div class="sheet-actions"><button class="primary" data-act="zoomto" data-lat="${at.lat}" data-lng="${at.lng}" data-z="${level === 'states' ? 7 : 12}">Zoom in</button><button class="ghost" data-act="close">Close</button></div>
   </article>`);
+}
+
+// ---------- parcels ----------
+
+async function showParcel(lat, lon, btn) {
+  const out = $('parcelOut');
+  if (!out) return;
+  btn.disabled = true;
+  out.innerHTML = '<p class="predict">Looking up public property records…</p>';
+  try {
+    const place = await placeName(lat, lon);
+    const r = await parcelAt(lat, lon, place?.st);
+    if (r.unsupported) {
+      out.innerHTML = `<p class="predict">${esc(place?.state || 'This state')} doesn't publish its property records statewide for free yet. Covered now: WI, NC, AR, FL, CO, VT, CT with owners; OH, IN, ND, CA, UT, NJ with parcel lines.</p>`;
+      return;
+    }
+    if (r.none) { out.innerHTML = '<p class="predict">No parcel found right here.</p>'; return; }
+    const i = r.info;
+    parcelLayer.clearLayers();
+    L.geoJSON(r.geojson, { style: { color: '#fff', weight: 3, dashArray: '6 6', fill: false }, interactive: false }).addTo(parcelLayer);
+    out.innerHTML = `<div class="parcel">
+      <div class="lbl">Land parcel · public record</div>
+      ${i.owner ? `<div class="owner">${esc(i.owner)}</div>` : '<div class="owner muted">Owner not published in this state</div>'}
+      <div class="pfacts">${i.acres ? `<span><b>${i.acres.toLocaleString()}</b> acres</span>` : ''}${i.id ? `<span>Parcel <b>${esc(i.id)}</b></span>` : ''}${i.use ? `<span>${esc(i.use)}</span>` : ''}${place ? `<span>${esc(place.short)}</span>` : ''}</div>
+    </div>`;
+  } catch {
+    out.innerHTML = '<p class="err">Couldn\'t reach the property records right now.</p>';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------- share cards ----------
@@ -656,7 +735,7 @@ async function onMapTap(lat, lon) {
     if (seq !== state.tapSeq) return;
     const sp = res.sides.point;
     showSheet('tap', detail('point', sp, res.layers, { stats: fieldStats(field, sp), lat, lon, field })
-      + (sp.code != null && isAg(sp.code) ? '<div class="sheet-actions one"><button class="primary share-btn" data-act="share">✨ Share this field</button></div>' : ''));
+      + `<div class="sheet-actions">${sp.code != null && isAg(sp.code) ? '<button class="primary share-btn" data-act="share">✨ Share</button>' : ''}<button class="ghost" data-act="parcel" data-lat="${lat}" data-lng="${lon}">🏠 Parcel & owner</button></div><div id="parcelOut"></div>`);
     // Everything the share card needs.
     const nowYear = res.layers.live?.year ?? res.layers.years[0] + 1;
     const hist = field?.history?.length
@@ -765,7 +844,7 @@ function openMenu() {
   showSheet('menu', `<nav class="menu">
     <button data-act="album"><b>🃏 Crop Cards</b><span>${albumSummary(state.album).got} cards · ${albumSummary(state.album).states} state stamps</span></button>
     <button data-act="trip"><b>Trip log</b><span>${t.total >= 50 ? `${miles(t.total)} mi so far` : 'Miles of each crop along your drive'}</span></button>
-    <button data-act="offline"><b>Save a route for offline</b><span>For stretches with no signal</span></button>
+    <button data-act="offline"><b>🧭 Plan a drive</b><span>What you'll pass on the way · save for offline</span></button>
     <button data-act="routes"><b>Saved routes</b><span>${routes.length ? `${routes.length} saved` : 'None yet'}</span></button>
     <button data-act="about"><b>About the data</b><span>Where each reading comes from</span></button>
   </nav>`);
@@ -774,12 +853,13 @@ els.menuBtn.addEventListener('click', () => (state.sheet === 'menu' ? closeSheet
 
 let downloadCtl = null;
 
-function openOffline() {
-  showSheet('offline', `<article class="detail"><div class="lbl">Save a route for offline</div>
-    <p class="predict">Downloads the crop maps along a route, so left/right readings keep working with no signal. The base map needs signal.</p>
+// Plan a drive: route → forecast of what you'll pass (ribbon + totals) → start it, or save it offline.
+function openOffline(prefillTo = '') {
+  showSheet('offline', `<article class="detail"><div class="lbl">Plan a drive</div>
+    <p class="predict">See what you'll drive past, then start the drive or save it for no-signal stretches. On Android you can also share a place from Google Maps to FieldSight.</p>
     <form class="route-form" id="routeForm">
       <label>From<input name="from" placeholder="Current location" autocomplete="off"></label>
-      <label>To<input name="to" placeholder="City, town or address" required autocomplete="off"></label>
+      <label>To<input name="to" placeholder="City, town or address" required autocomplete="off" value="${esc(prefillTo)}"></label>
       <button class="primary" type="submit">Find route</button>
     </form>
     <div id="routePlan"></div></article>`);
@@ -794,33 +874,68 @@ function openOffline() {
       });
       const plan = await planRoute(fd.get('from').trim(), fd.get('to').trim(), here);
       routeLayer.clearLayers();
-      const line = L.polyline(plan.coords, { color: '#e8c170', weight: 4, opacity: 0.9 }).addTo(routeLayer);
-      map.fitBounds(line.getBounds(), { paddingTopLeft: [20, 90], paddingBottomRight: [20, 320] });
+      const line = L.polyline(plan.coords, { color: '#ffffff', weight: 5, opacity: 0.9 }).addTo(routeLayer);
+      map.fitBounds(line.getBounds(), { paddingTopLeft: [20, 90], paddingBottomRight: [20, 360] });
       out.innerHTML = `<div class="plan"><b>${esc(plan.from.name)} → ${esc(plan.to.name)}</b>
-        <span>${Math.round(plan.miles)} mi · ${Math.floor(plan.minutes / 60)} h ${Math.round(plan.minutes % 60)} min · about ${plan.mb < 1 ? '<1' : Math.round(plan.mb)} MB</span></div>
-        <button class="primary" id="dlBtn">Download for offline</button>`;
+        <span>${Math.round(plan.miles)} mi · ${Math.floor(plan.minutes / 60)} h ${Math.round(plan.minutes % 60)} min</span></div>
+        <div id="forecast"><div class="dl"><i><b id="fcBar"></b></i><span id="fcText">Reading the fields along the way…</span></div></div>
+        <div class="sheet-actions"><button class="primary" id="goBtn">▶ Start this drive</button><button class="ghost" id="dlBtn">⬇ Save offline</button></div>
+        <div id="dlOut"></div>`;
+      // Forecast.
+      downloadCtl = new AbortController();
+      const scanSignal = downloadCtl.signal;
+      scanRoute(plan.coords, (done, total, stops) => {
+        const bar = $('fcBar'), txt = $('fcText');
+        if (bar) bar.style.width = `${(done / total * 100).toFixed(0)}%`;
+        if (txt) txt.textContent = `Reading the fields along the way… ${Math.round(done / total * 100)}%`;
+        if (done % 20 === 0 || done === total) paintRibbon(stops.filter(Boolean), plan);
+      }, scanSignal).then((scan) => {
+        plan.scan = scan;
+        state.plan = plan;
+        paintRibbon(scan.stops, plan, true);
+      });
+      $('goBtn').addEventListener('click', () => {
+        state.route = { coords: plan.coords, plan };
+        closeSheet();
+        driveRouteLayer.clearLayers();
+        L.polyline(plan.coords, { color: '#ffffff', weight: 6, opacity: 0.35, interactive: false }).addTo(driveRouteLayer);
+        if (state.mode !== 'drive') startDriving();
+        toast('🧭 Route set. Watch the top bar for what\'s coming up.');
+      });
       $('dlBtn').addEventListener('click', async () => {
-        downloadCtl = new AbortController();
-        out.innerHTML = '<div class="dl"><i><b id="dlBar"></b></i><span id="dlText">Starting…</span><button class="chip warn" id="dlCancel">Cancel</button></div>';
-        $('dlCancel').addEventListener('click', () => downloadCtl?.abort());
+        const dlOut = $('dlOut');
+        const ctl = new AbortController();
+        dlOut.innerHTML = '<div class="dl"><i><b id="dlBar"></b></i><span id="dlText">Starting…</span><button class="chip warn" id="dlCancel">Cancel</button></div>';
+        $('dlCancel').addEventListener('click', () => ctl.abort());
         try {
           const rec = await downloadRoute(plan, (done, total) => {
             const bar = $('dlBar'), txt = $('dlText');
             if (bar) bar.style.width = `${(done / total * 100).toFixed(1)}%`;
-            if (txt) txt.textContent = `${done.toLocaleString()} of ${total.toLocaleString()} map pieces`;
-          }, downloadCtl.signal);
-          downloadCtl = null;
-          if (!out.isConnected) setStatus('Route saved for offline', 'on');
-          out.innerHTML = `<p class="note"><b>Saved.</b> Left/right readings will work along this route with no signal${rec.failed ? ` (${rec.failed} pieces couldn't be downloaded)` : ''}.</p>`;
+            if (txt) txt.textContent = `${done.toLocaleString()} of ${total.toLocaleString()} map pieces (about ${plan.mb < 1 ? '<1' : Math.round(plan.mb)} MB)`;
+          }, ctl.signal);
+          if (!dlOut.isConnected) toast('⬇ Route saved for offline');
+          dlOut.innerHTML = `<p class="note"><b>Saved.</b> Left/right readings will work along this route with no signal${rec.failed ? ` (${rec.failed} pieces couldn't be downloaded)` : ''}.</p>`;
         } catch (err) {
-          downloadCtl = null;
-          out.innerHTML = err.name === 'AbortError' ? '<p class="predict">Cancelled. Pieces already downloaded stay saved.</p>' : `<p class="err">${esc(err.message)}</p>`;
+          dlOut.innerHTML = err.name === 'AbortError' ? '<p class="predict">Cancelled. Pieces already downloaded stay saved.</p>' : `<p class="err">${esc(err.message)}</p>`;
         }
       });
     } catch (err) {
       out.innerHTML = `<p class="err">${esc(err.message)}</p>`;
     }
   });
+}
+
+// The forecast: totals plus a ribbon per side showing what you pass, start to finish.
+function paintRibbon(stops, plan, final = false) {
+  const el = $('forecast');
+  if (!el || !stops.length) return;
+  const sum = summarize(stops).filter((r) => r.code != null).slice(0, 5);
+  const seg = (side) => stops.map((s) => `<i style="background:${s[side] != null && isAg(s[side]) ? cropColor(s[side]) : '#2b3038'}"></i>`).join('');
+  el.innerHTML = `${final ? '' : '<div class="dl"><i><b style="width:100%;opacity:.4"></b></i></div>'}
+    <div class="fc-chips">${sum.map((r) => `<span style="--c:${cropColor(r.code)}"><b>${cropEmoji(r.code)}</b>${esc(prettyName(r.code))} <em>${Math.round(r.share * 100)}%</em></span>`).join('')}</div>
+    <div class="ribbon"><span>L</span><div>${seg('left')}</div></div>
+    <div class="ribbon"><span>R</span><div>${seg('right')}</div></div>
+    <div class="ribbon-axis"><span>Start</span><span>${Math.round(plan.miles / 2)} mi</span><span>${Math.round(plan.miles)} mi</span></div>`;
 }
 
 function openRoutes() {
@@ -851,6 +966,7 @@ els.sheetBody.addEventListener('click', async (e) => {
   else if (act === 'about') { closeSheet(); els.about.showModal(); }
   else if (act === 'close') closeSheet();
   else if (act === 'share') openShareCard();
+  else if (act === 'parcel') showParcel(+b.dataset.lat, +b.dataset.lng, b);
   else if (act === 'sharego') {
     const r = await shareCanvas(state.shareCanvas, { title: 'FieldSight', text: state.shareText, filename: 'fieldsight.png' });
     if (r === 'downloaded') b.textContent = 'Saved to your downloads ✓';
@@ -985,6 +1101,18 @@ window.addEventListener('offline', () => state.mode === 'drive' && driveStatus(f
 if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { fsMap: map, fsFields: fields, fsState: state });
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+// Shared from another app (Android share sheet → FieldSight, e.g. a place in Google Maps):
+// open the planner with that place as the destination.
+{
+  const q = new URLSearchParams(location.search);
+  const shared = [q.get('title'), q.get('text')].filter(Boolean).join('\n');
+  if (shared) {
+    const place = shared.split('\n').map((l) => l.trim()).find((l) => l && !/^https?:/.test(l)) || '';
+    enterExplore(null, true);
+    setTimeout(() => openOffline(place), 300);
+  }
+}
 
 // Shareable spot: ?at=lat,lon opens the map there and inspects it.
 const at = new URLSearchParams(location.search).get('at')?.split(',').map(Number);

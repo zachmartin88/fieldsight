@@ -32,7 +32,7 @@ export async function placeName(lat, lng) {
   if (!hit) return null;
   const st = states?.features.find((f) => f.properties.st === hit.properties.st)?.properties.name || hit.properties.st;
   const county = countyName(hit.properties.name);
-  return { county, state: st, short: `${county}, ${hit.properties.st}` };
+  return { county, state: st, st: hit.properties.st, short: `${county}, ${hit.properties.st}` };
 }
 
 // ---------- drawing helpers ----------

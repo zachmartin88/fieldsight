@@ -29,6 +29,10 @@ export function parseColor(c) {
   };
   return [f(0), f(8), f(4)];
 }
+export const mixColor = (a, b, t) => {
+  const A = parseColor(a), B = parseColor(b);
+  return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(',')})`;
+};
 const shade = (c, t) => `rgb(${parseColor(c).map((v) => Math.round(v * (1 - t))).join(',')})`;
 
 // ---------- zoomed-out tiles ----------
@@ -209,6 +213,7 @@ export class FieldLayer {
     this.hovered = null;
     this.focus = null;      // crop code to highlight; others are dimmed
     this.solid = false;     // more opaque fills on the dark map, so colors stay bright
+    this.harvest = {};      // crop code -> share harvested in this state (USDA weekly report)
     this.enabled = true;
     this.req = 0;
     this.tooltip = L.tooltip({ className: 'field-tip', direction: 'top', offset: [0, -12], opacity: 1 });
@@ -252,6 +257,12 @@ export class FieldLayer {
   setEnabled(on) {
     this.enabled = on;
     if (!on) this.clear(); else this.refresh(true);
+  }
+
+  // Fields fade toward straw as their crop gets harvested.
+  setHarvest(h) {
+    this.harvest = h || {};
+    this.polys.forEach((p, id) => p && this.restyle(id));
   }
 
   setSolid(on) {
@@ -368,7 +379,8 @@ export class FieldLayer {
   }
 
   styleFor(id, c = this.grid.comps[id]) {
-    const col = cropColor(c.code);
+    const base = cropColor(c.code), cut = this.harvest[c.code] || 0;
+    const col = cut ? mixColor(base, '#c9b48e', Math.min(0.85, cut * 0.85)) : base;
     const sel = id === this.selected, hov = id === this.hovered;
     const dim = this.focus != null && c.code !== this.focus && !sel;
     const grassy = c.code === 176 || c.code === 171;

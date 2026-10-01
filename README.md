@@ -25,6 +25,25 @@ Layers are discovered from GetCapabilities at startup, so new monthly/annual map
 Lookups read fixed 0.01° tiles (~1 km, 10 m pixels), so consecutive lookups reuse loaded tiles and identical
 URLs can be cached by the proxy and the offline cache.
 
+## Map at every zoom
+
+- **≤ 6**: states, tinted by top planted crop, with a bubble (`IA 🌽 53%`)
+- **7–10**: counties, tinted by top planted crop (deeper = more cropland); emoji bubbles from 8, % from 9
+- **11**: the crop map itself, recolored into the app palette
+- **12+**: fields as vector shapes (hover, tap, spotlight a crop from the legend); **13+** uses USDA Crop
+  Sequence Boundaries (official field outlines + per-field history) where available, traced shapes elsewhere
+
+State/county numbers are precomputed from the live crop map: `node tools/build-regions.mjs`
+(re-run when a new monthly map comes out).
+
+## More
+
+- **Share cards** (`share.js`): Instagram-sized image of a field or your album, via the share sheet.
+- **Crop Cards** (`album.js`): collectible cards earned while driving, sets, rarity by national acreage, state stamps.
+- **Plan a drive** (`ahead.js`): route forecast ribbon, "next 10 mi" while driving; Android share target from Google Maps.
+- **Harvest color**: fields fade toward straw as USDA's weekly report shows harvest progress (needs proxy + key).
+- **Parcels** (`parcels.js`): owner/parcel from free statewide layers (WI, NC, AR, FL, CO, VT, CT; lines only for OH, IN, ND, CA, UT, NJ).
+
 ## Proxy (optional, `proxy/server.js`)
 
 Caches tiles (the upstream server has been flaky) and serves weekly USDA crop progress/condition for the

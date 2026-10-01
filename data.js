@@ -427,3 +427,28 @@ export async function lookup(lat, lon, mode = {}) {
   }
   return result;
 }
+
+// ---------- quick reads (for scanning a whole route) ----------
+
+/**
+ * Left/right crop at a point using only the current-season map (or the latest annual map when
+ * there's no live one): one layer instead of six, so a whole route can be scanned.
+ */
+export async function quickRead(lat, lon, heading) {
+  const layers = await discoverLayers();
+  const src = lookupSources(layers, 1)[0];
+  const out = {};
+  for (const side of ['left', 'right']) {
+    const pts = patchPoints(lat, lon, heading, side, 0);
+    const tiles = new Map();
+    for (const [a, b] of pts) {
+      const [i, j] = tileIndex(a, b);
+      const k = `${i}|${j}`;
+      if (!tiles.has(k)) tiles.set(k, await getTile(src, i, j).catch(() => null));
+    }
+    for (const [k, v] of tiles) if (!v) tiles.delete(k);
+    const v = tiles.size ? vote(pts.map(([a, b]) => sampleTiles(tiles, a, b))) : null;
+    out[side] = v && v.coverage > 0.4 ? v.code : null;
+  }
+  return out;
+}
