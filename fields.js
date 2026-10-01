@@ -7,7 +7,7 @@
 //
 // CropTiles (zoomed out): the same map as tiles, recolored into FieldSight's palette so colors match
 // at every zoom.
-import { rgbToCode, isAg, prettyName, wmsFetch, proxyUrl } from './data.js';
+import { rgbToCode, isAg, prettyName, wmsFetch, proxyUrl, slowNet } from './data.js';
 import { cropColor, cropEmoji, cropLabel } from './palette.js';
 
 export const FIELD_MIN_ZOOM = 12;
@@ -303,7 +303,8 @@ export class FieldLayer {
     const minx = b.getWest(), maxx = b.getEast(), miny = b.getSouth(), maxy = b.getNorth();
     const midLat = (miny + maxy) / 2;
     const wM = (maxx - minx) * 111320 * Math.cos(midLat * Math.PI / 180), hM = (maxy - miny) * 111320;
-    const scale = Math.max(1, Math.max(wM, hM) / METERS_PER_PX / MAX_PX);
+    // Weak signal: a smaller crop image for the view (coarser, but loads much faster).
+    const scale = Math.max(1, Math.max(wM, hM) / METERS_PER_PX / (slowNet() ? 450 : MAX_PX));
     const W = Math.max(32, Math.round(wM / METERS_PER_PX / scale)), H = Math.max(32, Math.round(hM / METERS_PER_PX / scale));
 
     const id = ++this.req;

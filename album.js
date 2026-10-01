@@ -2,7 +2,7 @@
 // Cards come in themed sets; rarity comes from how many acres of that crop the country grows
 // (from data/states.json), so a Christmas-tree farm really is a rare find. States you drive through
 // become stamps.
-import { prettyName, isAg } from './data.js';
+import { prettyName, isAg, cropsData } from './data.js';
 import { cropColor, cropEmoji } from './palette.js';
 
 export const SETS = [
@@ -30,9 +30,8 @@ let national = null;
 export async function loadRarity() {
   if (national) return national;
   try {
-    const st = await (await fetch('data/states.json')).json();
-    national = new Map();
-    for (const f of st.features) for (const [c, a] of f.properties.top) national.set(c, (national.get(c) || 0) + a);
+    const c = await cropsData();
+    national = new Map(Object.entries(c.national).map(([k, v]) => [+k, v]));
   } catch { national = new Map(); }
   return national;
 }

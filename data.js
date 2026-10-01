@@ -452,3 +452,16 @@ export async function quickRead(lat, lon, heading) {
   }
   return out;
 }
+
+// ---------- connection quality ----------
+
+// Weak signal (or the phone's data saver): load lighter maps.
+export function slowNet() {
+  const c = navigator.connection;
+  return !!(c && (c.saveData || ['slow-2g', '2g', '3g'].includes(c.effectiveType)));
+}
+
+// Every crop everywhere (tools/build-regions.mjs): { national: {code: acres}, states: {ST: {code: acres}},
+// top: {code: [[fips, acres, lat, lng, name, st], ...top 100 counties]} }.
+let cropsP;
+export const cropsData = () => (cropsP ??= fetch('data/crops.json').then((r) => r.json()));

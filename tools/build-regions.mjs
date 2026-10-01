@@ -122,7 +122,8 @@ function summarize(features, idx, codes) {
     ag: Math.round(s.ag),
     // Planted cropland: farmland minus grassland/pasture.
     crop: Math.round(s.ag - (s.crops.get(176) || 0) - (s.crops.get(171) || 0)),
-    top: [...s.crops].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([c, a]) => [c, Math.round(a)]),
+    all: s.crops,
+    top: [...s.crops].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([c, a]) => [c, Math.round(a)]),
     // Label point: middle of the county's own pixels (stays inside odd shapes better than a bbox).
     at: s.n ? [+(Y1 - (s.sy / s.n + 0.5) * RES).toFixed(3), +(X0 + (s.sx / s.n + 0.5) * RES).toFixed(3)] : null,
   }));
@@ -134,12 +135,32 @@ console.log('crop map:', src.layer, `${W}×${H}`);
 const codes = await cropGrid(src);
 
 fs.mkdirSync(OUT, { recursive: true });
-for (const [name, service, fields, offset, key] of [
-  ['states', 'USA_States_Generalized_Boundaries', 'STATE_ABBR,STATE_FIPS,STATE_NAME', 0.02, 'STATE_FIPS'],
-  ['counties', 'USA_Counties_Generalized_Boundaries', 'FIPS,NAME,STATE_ABBR,STATE_FIPS', 0.006, 'STATE_FIPS'],
+const crops = { source: src.layer, national: {}, states: {}, top: {} };
+// counties-lite: same numbers, much coarser outlines, for weak signal.
+for (const [name, service, fields, offset, key, precision] of [
+  ['states', 'USA_States_Generalized_Boundaries', 'STATE_ABBR,STATE_FIPS,STATE_NAME', 0.02, 'STATE_FIPS', 3],
+  ['counties', 'USA_Counties_Generalized_Boundaries', 'FIPS,NAME,STATE_ABBR,STATE_FIPS', 0.006, 'STATE_FIPS', 3],
+  ['counties-lite', 'USA_Counties_Generalized_Boundaries', 'FIPS,NAME,STATE_ABBR,STATE_FIPS', 0.03, 'STATE_FIPS', 2],
 ]) {
   const feats = (await geojson(service, fields, offset)).filter((f) => f.geometry && !SKIP_STATES.has(f.properties[key]));
   const sums = summarize(feats, rasterize(feats), codes);
+  // Every crop, everywhere (crops.json): national totals, each state's full list, top 100 counties per crop.
+  if (name === 'states') {
+    feats.forEach((f, i) => {
+      const st = {};
+      for (const [c, a] of sums[i].all) if (a >= 1) { st[c] = Math.round(a); crops.national[c] = (crops.national[c] || 0) + Math.round(a); }
+      crops.states[f.properties.STATE_ABBR] = st;
+    });
+  }
+  if (name === 'counties') {
+    const per = {};
+    feats.forEach((f, i) => {
+      for (const [c, a] of sums[i].all) if (a >= 20 && sums[i].at) (per[c] ||= []).push([f.properties.FIPS, Math.round(a), ...sums[i].at, f.properties.NAME, f.properties.STATE_ABBR]);
+    });
+    for (const [c, list] of Object.entries(per)) crops.top[c] = list.sort((a, b) => b[1] - a[1]).slice(0, 100);
+  }
+  const round = (g) => JSON.parse(JSON.stringify(g, (k, v) => (typeof v === 'number' ? +v.toFixed(precision) : v)));
+  sums.forEach((x) => delete x.all);
   const out = {
     type: 'FeatureCollection',
     source: src.layer,
@@ -150,9 +171,11 @@ for (const [name, service, fields, offset, key] of [
         name: f.properties.NAME || f.properties.STATE_NAME,
         st: f.properties.STATE_ABBR, ...sums[i],
       },
-      geometry: f.geometry,
+      geometry: round(f.geometry),
     })),
   };
   fs.writeFileSync(new URL(`${name}.json`, OUT), JSON.stringify(out));
   console.log(name, feats.length, `${(fs.statSync(new URL(`${name}.json`, OUT)).size / 1e6).toFixed(2)} MB`);
 }
+fs.writeFileSync(new URL('crops.json', OUT), JSON.stringify(crops));
+console.log('crops', Object.keys(crops.national).length, 'crops', `${(fs.statSync(new URL('crops.json', OUT)).size / 1e6).toFixed(2)} MB`);

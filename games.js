@@ -1,5 +1,5 @@
 // Games and daily content: road-trip bingo, guess the crop, crop of the day, county fun facts.
-import { prettyName, isAg, NOTES, lookup } from './data.js';
+import { prettyName, isAg, NOTES, lookup, cropsData, slowNet } from './data.js';
 import { cropColor, cropEmoji, categoryOf } from './palette.js';
 import { countyName } from './share.js';
 
@@ -17,7 +17,7 @@ const shuffle = (a, r) => { a = [...a]; for (let i = a.length - 1; i > 0; i--) {
 
 let statesP, countiesP;
 export const statesData = () => (statesP ??= fetch('data/states.json').then((r) => r.json()));
-export const countiesData = () => (countiesP ??= fetch('data/counties.json').then((r) => r.json()));
+export const countiesData = () => (countiesP ??= fetch(`data/${slowNet() ? 'counties-lite' : 'counties'}.json`).then((r) => r.json()));
 const GRASS = new Set([176, 171, 61]);
 
 // =====================================================================
@@ -30,14 +30,13 @@ const LINES = [[0, 1, 2], [3, 4, 5], [6, 7, 8], [0, 3, 6], [1, 4, 7], [2, 5, 8],
 export async function bingoCard(st) {
   const saved = get(BINGO_KEY, null);
   if (saved && saved.day === today()) return saved;
-  const states = (await statesData()).features;
+  const states = (await statesData()).features, crops = await cropsData();
   const home = states.find((f) => f.properties.st === st)?.properties || states.find((f) => f.properties.st === 'IA').properties;
   const r = rng(`${today()}-${home.st}`);
-  const local = home.top.map(([c]) => c).filter((c) => isAg(c) && !GRASS.has(c));
-  // A little harder: a couple of crops from the national list too.
-  const national = new Map();
-  for (const f of states) for (const [c, a] of f.properties.top) if (isAg(c) && !GRASS.has(c)) national.set(c, (national.get(c) || 0) + a);
-  const wider = shuffle([...national.keys()].filter((c) => !local.includes(c)), r).slice(0, 6);
+  // Everything grown in the state, biggest first; a few common ones plus some you'll have to hunt for.
+  const all = Object.entries(crops.states[home.st] || {}).map(([c, a]) => [+c, a]).filter(([c]) => isAg(c) && !GRASS.has(c)).sort((a, b) => b[1] - a[1]);
+  const local = all.slice(0, 4).map(([c]) => c);
+  const wider = shuffle(all.slice(4).filter(([, a]) => a > 2000).map(([c]) => c), r).slice(0, 6);
   const picks = [...local.slice(0, 5), ...wider].filter((c, i, a) => a.indexOf(c) === i);
   while (picks.length < 8) picks.push([1, 5, 24, 36, 2, 3, 4, 21][picks.length]);
   const cells = shuffle(picks.slice(0, 8), r);
@@ -127,22 +126,22 @@ export function cropOfTheDay() {
 
 /** National acres, top state, and the nearest county where it's a big crop. */
 export async function cropFacts(code, near) {
-  const [st, co] = await Promise.all([statesData(), countiesData()]);
-  let total = 0, topState = null, topA = 0;
-  for (const f of st.features) {
-    const a = f.properties.top.find(([c]) => c === code)?.[1] || 0;
-    total += a;
-    if (a > topA) { topA = a; topState = f.properties.name; }
+  const [st, crops] = await Promise.all([statesData(), cropsData()]);
+  const total = crops.national[code] || 0;
+  let topState = null, topA = 0;
+  for (const [abbr, list] of Object.entries(crops.states)) {
+    if ((list[code] || 0) > topA) { topA = list[code]; topState = st.features.find((f) => f.properties.st === abbr)?.properties.name || abbr; }
   }
+  // Nearest county with a real patch of it (bigger patches win ties on distance).
   let best = null, bestScore = Infinity;
-  for (const f of co.features) {
-    const p = f.properties, a = p.top.find(([c]) => c === code)?.[1] || 0;
-    if (!p.at || a < 3000) continue;
-    const d = near ? Math.hypot(p.at[0] - near.lat, (p.at[1] - near.lng) * Math.cos(near.lat * Math.PI / 180)) * 69 : 0;
+  const biggest = crops.top[code]?.[0]?.[1] || 0;
+  for (const [, a, lat, lng, name, abbr] of crops.top[code] || []) {
+    if (a < Math.min(3000, biggest * 0.2)) continue;
+    const d = near ? Math.hypot(lat - near.lat, (lng - near.lng) * Math.cos(near.lat * Math.PI / 180)) * 69 : 0;
     const score = near ? d / Math.sqrt(a) : -a;
-    if (score < bestScore) { bestScore = score; best = { name: `${countyName(p.name)}, ${p.st}`, at: p.at, acres: a, miles: near ? Math.round(d) : null }; }
+    if (score < bestScore) { bestScore = score; best = { name: `${countyName(name)}, ${abbr}`, at: [lat, lng], acres: a, miles: near ? Math.round(d) : null }; }
   }
-  return { total, topState, nearest: best };
+  return { total, topState, topStateAcres: topA, nearest: best, counties: crops.top[code]?.length || 0 };
 }
 
 export const cropBlurb = (code) => NOTES[code] || '';
@@ -155,12 +154,11 @@ export async function countyFacts(p) {
   const planted = p.top.filter(([c]) => !GRASS.has(c));
   if (!planted.length) return [];
   const [code, acres] = planted[0];
-  const [co, st] = await Promise.all([countiesData(), statesData()]);
-  const amount = (f) => f.properties.top.find(([c]) => c === code)?.[1] || 0;
-  const inState = co.features.filter((f) => f.properties.st === p.st).map(amount).sort((a, b) => b - a);
-  const nation = co.features.map(amount).sort((a, b) => b - a);
-  const rankState = inState.indexOf(acres) + 1, rankUS = nation.indexOf(acres) + 1;
-  const statesLess = st.features.filter((f) => amount(f) < acres).length;
+  const crops = await cropsData();
+  const list = crops.top[code] || [];
+  const rankUS = list.findIndex(([fips]) => fips === p.id) + 1;
+  const rankState = list.filter(([, , , , , abbr]) => abbr === p.st).findIndex(([fips]) => fips === p.id) + 1;
+  const statesLess = Object.values(crops.states).filter((s) => (s[code] || 0) < acres).length;
   const name = prettyName(code).toLowerCase(), emo = cropEmoji(code);
   const facts = [];
   if (rankState && rankState <= 10) facts.push(`${emo} The <b>#${rankState}</b> ${name} county in ${p.st}${rankUS <= 100 ? ` and <b>#${rankUS}</b> in the whole country` : ''}.`);

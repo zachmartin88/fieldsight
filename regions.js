@@ -2,7 +2,7 @@
 //   zoom ≤ 6   states: tinted by their top planted crop, with a bubble ("🌽 45%")
 //   zoom 7–10  counties: tinted by top planted crop, deeper where there's more cropland; bubbles from 8
 // Data comes from data/states.json and data/counties.json (tools/build-regions.mjs).
-import { prettyName } from './data.js';
+import { prettyName, slowNet } from './data.js';
 import { cropColor, cropEmoji, categoryOf } from './palette.js';
 import { mixColor } from './fields.js';
 
@@ -33,7 +33,8 @@ const MIN_CROPLAND = { states: 0.06, counties: 0.12 };
 const MIN_SHARE = 0.25;
 const farmShare = (p) => (p.area ? p.crop / p.area : 0);
 
-const load = (name) => fetch(`data/${name}.json`).then((r) => r.json());
+// On weak signal, counties load as a lighter file (coarser outlines, same numbers).
+const load = (name) => fetch(`data/${name === 'counties' && slowNet() ? 'counties-lite' : name}.json`).then((r) => r.json());
 
 export class RegionLayer {
   constructor(map, { pane, outlinePane, labelPane = 'markerPane', onTap, insets, onUpdate, reserved } = {}) {

@@ -158,6 +158,51 @@ async function progress(params) {
   return { status: e.status, type: e.type, body: e.body, headers: { 'Cache-Control': 'public, max-age=3600' } };
 }
 
+// ---------- leaderboard ----------
+// Each phone keeps its own totals and re-sends them when the app opens, so the board rebuilds
+// itself after the free server restarts. No accounts: a random device id plus a nickname.
+const board = new Map();          // id -> { name, cards, states, badges, miles, score, at }
+const NAME_OK = /^[\p{L}\p{N} ._'-]{2,18}$/u;
+const BLOCK = /(fuck|shit|cunt|nigg|fag|bitch|dick|pussy|rape)/i;
+const clampInt = (v, max) => Math.max(0, Math.min(max, Math.floor(Number(v) || 0)));
+
+function lbScore(p) { return p.cards * 10 + p.states * 20 + p.badges * 15 + Math.floor(p.miles); }
+
+async function readBody(req, limit = 2048) {
+  let body = '';
+  for await (const chunk of req) { body += chunk; if (body.length > limit) throw new Error('too big'); }
+  return body;
+}
+
+async function lbSubmit(req) {
+  const b = JSON.parse(await readBody(req));
+  const id = String(b.id || '');
+  if (!/^[a-z0-9-]{8,40}$/i.test(id)) return json(400, { error: 'bad id' });
+  const name = String(b.name || '').trim();
+  if (!NAME_OK.test(name) || BLOCK.test(name)) return json(400, { error: 'pick another name' });
+  const prev = board.get(id);
+  if (prev && Date.now() - prev.at < 5000) return json(429, { error: 'slow down' });
+  const p = { name, cards: clampInt(b.cards, 200), states: clampInt(b.states, 48), badges: clampInt(b.badges, 60), miles: clampInt(b.miles, 200000), at: Date.now() };
+  p.score = lbScore(p);
+  board.set(id, p);
+  return json(200, { ok: true, rank: rankOf(id), players: board.size });
+}
+
+function rankOf(id) {
+  const me = board.get(id);
+  if (!me) return null;
+  let r = 1;
+  for (const p of board.values()) if (p.score > me.score) r++;
+  return r;
+}
+
+function lbTop(params) {
+  const id = params.get('id');
+  const top = [...board.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, 50)
+    .map(([pid, p]) => ({ name: p.name, score: p.score, cards: p.cards, states: p.states, badges: p.badges, miles: p.miles, me: pid === id }));
+  return { status: 200, type: 'application/json', body: Buffer.from(JSON.stringify({ top, players: board.size, rank: id ? rankOf(id) : null })), headers: { 'Cache-Control': 'no-store' } };
+}
+
 function json(status, obj) {
   return { status, type: 'application/json', body: Buffer.from(JSON.stringify(obj)) };
 }
@@ -166,16 +211,18 @@ function json(status, obj) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
-  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS' };
+  const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
-  if (req.method !== 'GET') { res.writeHead(405, cors); return res.end(); }
   let out;
   try {
     const m = url.pathname.match(/^\/wms\/(icrop|cdlall)$/);
-    if (url.pathname === '/health') out = json(200, { ok: true, cachedMB: +(cache.bytes / 1048576).toFixed(1), progress: !!QUICKSTATS_KEY });
+    if (req.method === 'POST' && url.pathname === '/lb') out = await lbSubmit(req);
+    else if (req.method !== 'GET') out = json(405, { error: 'method' });
+    else if (url.pathname === '/health') out = json(200, { ok: true, cachedMB: +(cache.bytes / 1048576).toFixed(1), progress: !!QUICKSTATS_KEY });
     else if (m) out = await wms(m[1], url.searchParams);
     else if (url.pathname === '/progress') out = await progress(url.searchParams);
     else if (url.pathname === '/csb') out = await csb(url.searchParams);
+    else if (url.pathname === '/lb') out = lbTop(url.searchParams);
     else out = json(404, { error: 'not found' });
   } catch (err) {
     out = json(502, { error: 'upstream failed', detail: String(err.message || err) });

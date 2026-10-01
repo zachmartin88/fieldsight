@@ -1,6 +1,6 @@
 // Shareable cards: a 1080×1350 image (Instagram portrait) of a field, sent through the phone's share
 // sheet (Messages, Instagram, etc.) or downloaded where sharing files isn't supported.
-import { prettyName } from './data.js';
+import { prettyName, slowNet } from './data.js';
 import { cropColor, cropEmoji, shortName } from './palette.js';
 import { parseColor } from './fields.js';
 
@@ -22,7 +22,7 @@ function inRing(lat, lng, ring) {
   return inside;
 }
 export async function placeName(lat, lng) {
-  countiesP ??= fetch('data/counties.json').then((r) => r.json()).catch(() => null);
+  countiesP ??= fetch(`data/${slowNet() ? 'counties-lite' : 'counties'}.json`).then((r) => r.json()).catch(() => null);
   statesP ??= fetch('data/states.json').then((r) => r.json()).catch(() => null);
   const [counties, states] = await Promise.all([countiesP, statesP]);
   const hit = counties?.features.find((f) => {

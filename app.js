@@ -1,5 +1,5 @@
 import {
-  lookup, discoverLayers, prettyName, isAg, NOTES, sideArea, LIVE_WMS, ANNUAL_WMS,
+  lookup, discoverLayers, prettyName, isAg, NOTES, sideArea, LIVE_WMS, ANNUAL_WMS, cropsData,
   wakeProxy, proxyUrl,
 } from './data.js';
 import { FieldLayer, CropTiles, FIELD_MIN_ZOOM } from './fields.js';
@@ -11,9 +11,10 @@ import { parcelAt } from './parcels.js';
 import { BeltLayer, BELTS, nextFact, randomFact } from './belts.js';
 import { fieldCard, albumCard, shareCanvas, placeName, countyName } from './share.js';
 import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate, rarityOf } from './album.js';
-import { fx, kernel, settings, stats, saveStats, addMiles, checkBadges, badgesHtml } from './fun.js';
+import { fx, kernel, settings, stats, saveStats, addMiles, checkBadges, badgesHtml, earned } from './fun.js';
 import { bingoCard, bingoSpot, bingoHtml, guessRound, satelliteHtml, cropOfTheDay, cropFacts, cropBlurb, countyFacts } from './games.js';
 import { SeasonLayer, season } from './season.js';
+import { showOnboarding, onboarded } from './onboarding.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -164,10 +165,10 @@ async function renderKey() {
   // Share of U.S. cropland per category (from the state summaries), for a little "how big is it" bar.
   const share = new Map();
   try {
-    const st = await (await fetch('data/states.json')).json();
+    const crops = await cropsData();
     let total = 0;
-    for (const f of st.features) for (const [c, a] of f.properties.top) {
-      const cat = categoryOf(c);
+    for (const [c, a] of Object.entries(crops.national)) {
+      const cat = categoryOf(+c);
       if (!cat || cat.id === 'pasture') continue;
       share.set(cat.id, (share.get(cat.id) || 0) + a); total += a;
     }
@@ -458,6 +459,7 @@ async function collect(res) {
     if (r && (r.isNew || r.levelUp)) {
       celebrate(document.body, s.code, r.card, { levelUp: r.levelUp });
       fx('card');
+      submitScore();
       if (r.isNew) {
         speak(`New card: ${prettyName(s.code)}!`);
         const rar = rarityOf(s.code);
@@ -485,8 +487,57 @@ fetch('data/states.json').then((r) => r.json()).then((j) => {
 }).catch(() => {});
 loadRarity();
 
+// ---------- leaderboard (lives on the proxy; each phone re-sends its own totals) ----------
+
+const FUN_NAMES = ['Corny Coyote', 'Bean Queen', 'Wheat Wizard', 'Hay Hero', 'Sorghum Sam', 'Rice Rocket', 'Barley Bandit', 'Oat Otter', 'Cotton Comet', 'Tater Tot', 'Alfalfa Ace', 'Kernel Kid'];
+function deviceId() {
+  let id = localGet('fs.id');
+  if (!id) { id = (crypto.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`); localSet('fs.id', id); }
+  return id;
+}
+function nickname() {
+  let n = localGet('fs.name');
+  if (!n) { n = `${FUN_NAMES[Math.floor(Math.random() * FUN_NAMES.length)]} ${Math.floor(Math.random() * 90 + 10)}`; localSet('fs.name', n); }
+  return n;
+}
+function myTotals() {
+  const sum = albumSummary(state.album);
+  return { cards: sum.got, states: sum.states, badges: Object.keys(earned).length, miles: Math.floor(stats.totalMiles) };
+}
+let lbTimer = null;
+function submitScore(now = false) {
+  if (!proxyUrl) return;
+  clearTimeout(lbTimer);
+  lbTimer = setTimeout(() => fetch(`${proxyUrl}/lb`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: deviceId(), name: nickname(), ...myTotals() }),
+  }).then((r) => r.json()).catch(() => null), now ? 0 : 4000);
+}
+
+async function openLeaderboard() {
+  const t = myTotals(), score = t.cards * 10 + t.states * 20 + t.badges * 15 + t.miles;
+  const me = `<div class="lb-me">
+      <div><small>You</small><b id="lbName">${esc(nickname())}</b><button class="chip" data-act="rename">✏️ Change</button></div>
+      <div class="lb-score"><b>${score.toLocaleString()}</b><small>points</small></div>
+    </div>
+    <div class="lb-break"><span>🃏 ${t.cards} cards ×10</span><span>🗺️ ${t.states} states ×20</span><span>🏅 ${t.badges} badges ×15</span><span>🛣️ ${t.miles} miles</span></div>`;
+  showSheet('lb', `<article class="detail"><div class="lbl">🏆 Leaderboard</div>${me}<div id="lbList"><p class="predict">Loading the board…</p></div></article>`);
+  if (!proxyUrl) { $('lbList').innerHTML = '<p class="predict">The leaderboard needs the FieldSight server.</p>'; return; }
+  await fetch(`${proxyUrl}/lb`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: deviceId(), name: nickname(), ...t }) }).catch(() => null);
+  const j = await fetch(`${proxyUrl}/lb?id=${encodeURIComponent(deviceId())}`).then((r) => r.json()).catch(() => null);
+  const el = $('lbList');
+  if (!el) return;
+  if (!j) { el.innerHTML = '<p class="predict">Couldn\'t reach the board. The server may be waking up; try again in a moment.</p>'; return; }
+  const medal = (i) => ['🥇', '🥈', '🥉'][i] || `${i + 1}`;
+  el.innerHTML = `<p class="predict">You're <b>#${j.rank ?? '–'}</b> of ${j.players} player${j.players === 1 ? '' : 's'}.</p>
+    <ol class="lb">${j.top.map((p, i) => `<li class="${p.me ? 'me' : ''}"><span class="rk">${medal(i)}</span><span class="nm">${esc(p.name)}</span>
+      <span class="mini">🃏${p.cards} 🗺️${p.states}</span><b>${p.score.toLocaleString()}</b></li>`).join('')}</ol>
+    <p class="fine">Collect cards, stamp states, earn badges and drive miles to climb. Scores come from each player's phone.</p>`;
+}
+
 // Milestone badges: check after anything that could earn one.
 function rewardBadges() {
+  submitScore();
   const fresh = checkBadges(state.album, albumSummary(state.album));
   fresh.forEach((b, i) => setTimeout(() => {
     fx('ding');
@@ -1047,11 +1098,13 @@ function openMenu() {
     <button data-act="cotd"><b>⭐ Crop of the day</b><span>Today: ${cropEmoji(cropOfTheDay())} ${esc(prettyName(cropOfTheDay()))}</span></button>
     <button data-act="bingo"><b>🎯 Road-trip bingo</b><span>Today's card · spot 3 in a row</span></button>
     <button data-act="guess"><b>🧩 Guess the crop</b><span>Bird's-eye photo quiz${stats.guessBest ? ` · best streak ${stats.guessBest}` : ''}</span></button>
+    <button data-act="lb"><b>🏆 Leaderboard</b><span>See how you stack up</span></button>
     <button data-act="album"><b>🃏 Crop Cards & badges</b><span>${albumSummary(state.album).got} cards · ${albumSummary(state.album).states} state stamps</span></button>
     <button data-act="trip"><b>Trip log</b><span>${t.total >= 50 ? `${miles(t.total)} mi so far` : 'Miles of each crop along your drive'}</span></button>
     <button data-act="offline"><b>🧭 Plan a drive</b><span>What you'll pass on the way · save for offline</span></button>
     <button data-act="routes"><b>Saved routes</b><span>${routes.length ? `${routes.length} saved` : 'None yet'}</span></button>
     <button data-act="about"><b>About the data</b><span>Where each reading comes from</span></button>
+    <button data-act="tour"><b>📖 How FieldSight works</b><span>Replay the quick walkthrough</span></button>
     <div class="toggles">
       <button data-act="tog" data-k="sound" class="${settings.sound ? 'on' : ''}">🔊 Sounds</button>
       <button data-act="tog" data-k="buzz" class="${settings.buzz ? 'on' : ''}">📳 Buzz</button>
@@ -1170,6 +1223,13 @@ els.sheetBody.addEventListener('click', async (e) => {
     if (settings[b.dataset.k]) { fx('pop'); if (b.dataset.k === 'mascot') kernel('Hi again! 👋'); }
   }
   else if (act === 'bingo') openBingo();
+  else if (act === 'lb') openLeaderboard();
+  else if (act === 'rename') {
+    const n = prompt('Pick a nickname (2–18 letters or numbers):', nickname());
+    if (n && /^[\p{L}\p{N} ._'-]{2,18}$/u.test(n.trim())) { localSet('fs.name', n.trim()); submitScore(true); setTimeout(openLeaderboard, 300); }
+    else if (n) toast('Use 2–18 letters, numbers or spaces');
+  }
+  else if (act === 'tour') { closeSheet(); showOnboarding(); }
   else if (act === 'guess') openGuess();
   else if (act === 'guessed') answerGuess(+b.dataset.code, b);
   else if (act === 'cotd') openCropOfDay();
@@ -1334,11 +1394,15 @@ document.body.classList.add('welcoming');
   const [, sn] = season(), cotd = cropOfTheDay();
   $('welcomeChips').innerHTML = `<button class="wchip" data-w="cotd">⭐ Crop of the day: ${cropEmoji(cotd)} ${esc(prettyName(cotd))}</button><span class="wchip plain">${sn.emoji} ${sn.name}</span>`;
   $('welcomeChips').addEventListener('click', (e) => { if (e.target.closest('[data-w=cotd]')) { enterExplore(null, true); openCropOfDay(); } });
-  // Kernel says hi once a day.
-  if (localGet('fs.kernelDay') !== new Date().toDateString()) {
+  // First launch: the walkthrough. After that, Kernel says hi once a day.
+  const greet = () => {
+    if (localGet('fs.kernelDay') === new Date().toDateString()) return;
     localSet('fs.kernelDay', new Date().toDateString());
-    setTimeout(() => kernel(`Hi, I'm <b>Kernel</b>! 🌽 It's ${sn.name.toLowerCase()}. Tap a glowing region for fun facts, or try today's bingo in the ☰ menu.`, { ms: 8000 }), 1400);
-  }
+    setTimeout(() => kernel(`It's ${sn.name.toLowerCase()}! ${sn.emoji} Tap a glowing region for fun facts, or try today's bingo in the ☰ menu.`, { ms: 7000 }), 900);
+  };
+  const q = new URLSearchParams(location.search);
+  if (!onboarded() && !q.has('at') && !q.has('text')) showOnboarding({ onDone: greet });
+  else greet();
 }
 els.headBtn.setAttribute('aria-pressed', String(state.headingUp));
 els.startBtn.addEventListener('click', startDriving);
@@ -1346,6 +1410,9 @@ els.exploreBtn.addEventListener('click', () => enterExplore());
 els.about.addEventListener('click', (e) => { if (e.target === els.about) els.about.close(); });
 window.addEventListener('online', () => state.mode === 'drive' && driveStatus(false));
 window.addEventListener('offline', () => state.mode === 'drive' && driveStatus(false));
+
+// Keep this phone on the leaderboard (re-sent each visit, so the board survives server restarts).
+if (proxyUrl) setTimeout(() => submitScore(true), 3000);
 
 // ?debug exposes internals in the console.
 if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { fsMap: map, fsFields: fields, fsState: state });
