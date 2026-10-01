@@ -666,6 +666,8 @@ function detail(sideKey, s, layers, { stats = [], lat, lon, field = null } = {})
 
 function showSheet(kind, html, two = false) {
   state.sheet = kind;
+  // Only a farm-region card keeps its pill wiggling; anything else stops it.
+  if (kind !== 'belt') belts?.setActive(null);
   els.sheetBody.className = `sheet-body${two ? ' two' : ''}`;
   els.sheetBody.innerHTML = html;
   els.sheet.hidden = false;
