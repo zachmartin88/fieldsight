@@ -8,7 +8,7 @@ import { cropColor, cropEmoji, shortName, TYPICAL_YIELD, CATEGORIES, categoryOf 
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
 import { scanRoute, summarize, nearestStop } from './ahead.js';
 import { parcelAt } from './parcels.js';
-import { BeltLayer } from './belts.js';
+import { BeltLayer, BELTS, nextFact, randomFact } from './belts.js';
 import { fieldCard, albumCard, shareCanvas, placeName, countyName } from './share.js';
 import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate } from './album.js';
 
@@ -692,6 +692,7 @@ function closeSheet() {
   parcelLayer.clearLayers();
   fields.select(null);
   fields.relabel();
+  belts?.setActive(null);
   if (wasTap && state.mode === 'drive' && state.fix) { state.following = true; els.recenter.hidden = true; follow(true); }
 }
 els.sheetClose.addEventListener('click', closeSheet);
@@ -701,11 +702,14 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet
 
 function openBelt(b) {
   const c = CATEGORIES.find((x) => x.id === b.cat);
+  const f = nextFact(b);
+  belts.setActive(b.id);   // its pill wiggles while the card is open
   showSheet('belt', `<article class="detail belt-sheet" style="--c:${c.color}">
     <div class="lbl">Famous farm region</div>
     <div class="crop"><span class="big-emo" style="--c:${c.color}">${b.emoji}</span><span class="crop-name">${esc(b.name)}</span></div>
     <div class="belt-sub">📍 ${esc(b.sub)}</div>
-    <p class="belt-fact">${esc(b.fact)}</p>
+    <p class="belt-fact" id="beltFact">${esc(f.text)}</p>
+    <div class="fact-row"><span id="factCount">Fact ${f.n} of ${f.of}</span><button class="chip" data-act="morefact" data-id="${b.id}">🎲 Another fact</button></div>
     <div class="sheet-actions"><button class="primary" data-act="beltspot" data-code="${c.codes[0]}">🔦 Spotlight ${esc(c.name.toLowerCase())}</button><button class="ghost" data-act="zoomto" data-lat="${b.fly[0]}" data-lng="${b.fly[1]}" data-z="${b.fly[2]}">✈️ Fly there</button></div>
   </article>`);
 }
@@ -1035,6 +1039,12 @@ els.sheetBody.addEventListener('click', async (e) => {
   else if (act === 'about') { closeSheet(); els.about.showModal(); }
   else if (act === 'close') closeSheet();
   else if (act === 'beltspot') { closeSheet(); spotlight(+b.dataset.code); }
+  else if (act === 'morefact') {
+    const belt = BELTS.find((x) => x.id === b.dataset.id), f = nextFact(belt), el = $('beltFact');
+    el.classList.remove('flip'); void el.offsetWidth; el.classList.add('flip');
+    el.textContent = f.text;
+    $('factCount').textContent = `Fact ${f.n} of ${f.of}`;
+  }
   else if (act === 'share') openShareCard();
   else if (act === 'parcel') showParcel(+b.dataset.lat, +b.dataset.lng, b);
   else if (act === 'sharego') {
@@ -1160,6 +1170,11 @@ function simulate() {
 }
 
 document.body.classList.add('welcoming');
+{
+  // A different fun fact on the welcome card each visit.
+  const f = randomFact();
+  $('didYouKnow').innerHTML = `<b>${f.belt.emoji} Did you know?</b> ${esc(f.text)}`;
+}
 els.headBtn.setAttribute('aria-pressed', String(state.headingUp));
 els.startBtn.addEventListener('click', startDriving);
 els.exploreBtn.addEventListener('click', () => enterExplore());

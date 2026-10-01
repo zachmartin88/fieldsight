@@ -548,3 +548,19 @@ body.welcoming .key, body.sheet-open .key { display: none; }
   .key-body .kname { font-size: 12px; }
   .key-body .kbar { display: none; }
 }
+
+/* pill wiggles while its fact card is open */
+.belt.active { animation: jiggle 1.1s ease-in-out infinite; filter: brightness(1.2); z-index: 5; }
+@keyframes jiggle {
+  0%, 100% { transform: translate(-50%, -50%) rotate(var(--rot)) scale(calc(var(--s) * 1.08)); }
+  20% { transform: translate(-50%, -50%) rotate(calc(var(--rot) - 4deg)) scale(calc(var(--s) * 1.1)); }
+  40% { transform: translate(-50%, -50%) rotate(calc(var(--rot) + 3deg)) scale(calc(var(--s) * 1.08)); }
+  60% { transform: translate(-50%, -50%) rotate(calc(var(--rot) - 2deg)) scale(calc(var(--s) * 1.1)); }
+  80% { transform: translate(-50%, -50%) rotate(calc(var(--rot) + 1deg)) scale(calc(var(--s) * 1.08)); }
+}
+.fact-row { display: flex; justify-content: space-between; align-items: center; margin: 2px 0 10px; font-size: 11.5px; color: var(--muted); font-weight: 700; }
+.belt-fact.flip { animation: factflip .35s ease; }
+@keyframes factflip { from { transform: rotateX(70deg); opacity: 0; } }
+.dyk { font-size: 13.5px !important; line-height: 1.45; padding: 10px 12px; border-radius: 12px; margin: 0 0 12px !important;
+  background: rgba(232,193,112,.08); border: 1px solid rgba(232,193,112,.25); color: #d6dae1 !important; }
+.dyk b { color: var(--gold); }
