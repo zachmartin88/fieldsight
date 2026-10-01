@@ -6,6 +6,8 @@ import { FieldLayer, CropTiles, FIELD_MIN_ZOOM } from './fields.js';
 import { RegionLayer, COUNTY_MAX_ZOOM, topCrop, isPlanted } from './regions.js';
 import { cropColor, cropEmoji, shortName, TYPICAL_YIELD } from './palette.js';
 import { planRoute, downloadRoute, loadRoutes, deleteRoute } from './offline.js';
+import { fieldCard, albumCard, shareCanvas, placeName, countyName } from './share.js';
+import { loadAlbum, loadRarity, recordSighting, recordState, albumHtml, albumSummary, celebrate } from './album.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -33,6 +35,9 @@ const state = {
   layers: null,
   focus: null,           // crop code spotlighted from the legend
   trip: loadTrip(),
+  album: loadAlbum(),
+  lastPlaceAt: null,     // where we last looked up the county/state (for cards and stamps)
+  place: null,
 };
 
 function localGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
@@ -323,6 +328,7 @@ async function driveQuery(lat, lon, opts) {
     renderStrip(res);
     drawSideAreas(res, opts);
     logTrip(res);
+    collect(res);
     if (state.sheet === 'drive') openDriveSheet();
     announce(res);
   } catch {
@@ -334,6 +340,48 @@ async function driveQuery(lat, lon, opts) {
     state.inFlight = false;
     driveStatus(false);
   }
+}
+
+// ---------- collecting cards while driving ----------
+
+// Cards come from confident readings only: the live map, or the USDA map where there's no live data.
+async function collect(res) {
+  const here = { lat: res.lat, lon: res.lon };
+  if (!state.lastPlaceAt || distM(state.lastPlaceAt, here) > 4000) {
+    state.lastPlaceAt = here;
+    placeName(res.lat, res.lon).then((p) => {
+      state.place = p;
+      const st = p ? Object.entries(STATE_ABBR).find(([, n]) => n === p.state)?.[0] : null;
+      if (st && recordState(state.album, st)) toast(`🗺️ New state stamp: ${p.state}!`);
+    });
+  }
+  for (const s of Object.values(res.sides)) {
+    if (!['live', 'live-changed', 'annual'].includes(s.tier)) continue;
+    const r = recordSighting(state.album, s.code, { ...here, place: state.place?.short });
+    if (r && (r.isNew || r.levelUp)) {
+      celebrate(document.body, s.code, r.card, { levelUp: r.levelUp });
+      if (r.isNew) speak(`New card: ${prettyName(s.code)}!`);
+    }
+  }
+}
+
+let STATE_ABBR = {};
+fetch('data/states.json').then((r) => r.json()).then((j) => {
+  STATE_ABBR = Object.fromEntries(j.features.map((f) => [f.properties.st, f.properties.name]).sort());
+}).catch(() => {});
+loadRarity();
+
+function toast(text) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = text;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add('out'), 2800);
+  setTimeout(() => el.remove(), 3300);
+}
+
+function openAlbum() {
+  showSheet('album', albumHtml(state.album, Object.entries(STATE_ABBR)));
 }
 
 // ---------- the top strip ----------
@@ -551,7 +599,7 @@ function openRegion(level, p, at) {
   const planted = p.top.filter(([c]) => isPlanted(c));
   const max = planted[0]?.[1] || 1;
   const fmt = (a) => (a >= 1e6 ? `${(a / 1e6).toFixed(1)}M` : a >= 1e3 ? `${Math.round(a / 1e3)}k` : String(a));
-  const name = level === 'states' ? p.name : `${p.name} County, ${p.st}`;
+  const name = level === 'states' ? p.name : `${countyName(p.name)}, ${p.st}`;
   const live = state.layers?.live?.label;
   showSheet('region', `<article class="detail">
     <div class="lbl">${level === 'states' ? 'State' : 'County'} · ${live ? `${esc(live)} live map` : 'USDA map'}</div>
@@ -565,6 +613,22 @@ function openRegion(level, p, at) {
       <span class="bname">${esc(prettyName(c))}</span><i><b style="width:${(a / max * 100).toFixed(1)}%;background:${cropColor(c)}"></b></i><span class="bval">${fmt(a)} ac</span></div>`).join('')}</div>
     <div class="sheet-actions"><button class="primary" data-act="zoomto" data-lat="${at.lat}" data-lng="${at.lng}" data-z="${level === 'states' ? 7 : 12}">Zoom in</button><button class="ghost" data-act="close">Close</button></div>
   </article>`);
+}
+
+// ---------- share cards ----------
+
+async function openShareCard() {
+  const info = state.shareInfo;
+  if (!info) return;
+  showSheet('share', '<article class="detail"><div class="lbl">Share</div><p class="predict">Making your card…</p></article>');
+  info.place = await placeName(info.lat, info.lon);
+  const cv = await fieldCard(info);
+  state.shareCanvas = cv;
+  state.shareText = `${cropEmoji(info.code)} ${prettyName(info.code)}${info.acres ? `, ${info.acres} acres` : ''}${info.place ? ` in ${info.place.county}, ${info.place.state}` : ''}. Spotted with FieldSight.`;
+  if (state.sheet !== 'share') return;
+  showSheet('share', `<article class="detail"><div class="lbl">Share this field</div>
+    <img class="card-preview" src="${cv.toDataURL('image/png')}" alt="Share card">
+    <div class="sheet-actions"><button class="primary" data-act="sharego">Share</button><button class="ghost" data-act="close">Close</button></div></article>`);
 }
 
 // ---------- tapping the map ----------
@@ -590,7 +654,20 @@ async function onMapTap(lat, lon) {
   try {
     const res = await lookup(lat, lon, { tapped: true });
     if (seq !== state.tapSeq) return;
-    showSheet('tap', detail('point', res.sides.point, res.layers, { stats: fieldStats(field, res.sides.point), lat, lon, field }));
+    const sp = res.sides.point;
+    showSheet('tap', detail('point', sp, res.layers, { stats: fieldStats(field, sp), lat, lon, field })
+      + (sp.code != null && isAg(sp.code) ? '<div class="sheet-actions one"><button class="primary share-btn" data-act="share">✨ Share this field</button></div>' : ''));
+    // Everything the share card needs.
+    const nowYear = res.layers.live?.year ?? res.layers.years[0] + 1;
+    const hist = field?.history?.length
+      ? [...field.history, ...sp.history.filter((h) => h.year > field.history.at(-1).year)] : sp.history;
+    state.shareInfo = {
+      code: sp.code, tier: sp.tier, liveLabel: res.layers.live?.label, nowYear, lat, lon,
+      history: hist.filter((h) => h.code != null && h.year < nowYear),
+      acres: field?.acres, football: field ? Math.round(field.acres / 1.32) : null,
+      yieldText: fieldStats(field, sp)[2]?.slice(0, 2).join(' ').replace(' at a typical yield', '') || null,
+      rings: field ? fields.fieldRings(field.id) : null,
+    };
   } catch (err) {
     if (seq !== state.tapSeq) return;
     showSheet('tap', `<article class="detail"><div class="lbl">This spot</div><p class="err">${esc(err.message)}. Try again in a moment.</p></article>`);
@@ -686,6 +763,7 @@ function openMenu() {
   const routes = loadRoutes();
   const t = state.trip;
   showSheet('menu', `<nav class="menu">
+    <button data-act="album"><b>🃏 Crop Cards</b><span>${albumSummary(state.album).got} cards · ${albumSummary(state.album).states} state stamps</span></button>
     <button data-act="trip"><b>Trip log</b><span>${t.total >= 50 ? `${miles(t.total)} mi so far` : 'Miles of each crop along your drive'}</span></button>
     <button data-act="offline"><b>Save a route for offline</b><span>For stretches with no signal</span></button>
     <button data-act="routes"><b>Saved routes</b><span>${routes.length ? `${routes.length} saved` : 'None yet'}</span></button>
@@ -761,11 +839,22 @@ els.sheetBody.addEventListener('click', async (e) => {
   if (!b) return;
   const act = b.dataset.act;
   if (act === 'trip') openTrip();
+  else if (act === 'album') openAlbum();
+  else if (act === 'sharealbum') {
+    const cv = await albumCard(state.album);
+    const sum = albumSummary(state.album);
+    await shareCanvas(cv, { title: 'My FieldSight album', text: `I've collected ${sum.got} crop cards and ${sum.states} state stamps on FieldSight! 🌽🫘🌾`, filename: 'fieldsight-album.png' });
+  }
   else if (act === 'menu') openMenu();
   else if (act === 'offline') openOffline();
   else if (act === 'routes') openRoutes();
   else if (act === 'about') { closeSheet(); els.about.showModal(); }
   else if (act === 'close') closeSheet();
+  else if (act === 'share') openShareCard();
+  else if (act === 'sharego') {
+    const r = await shareCanvas(state.shareCanvas, { title: 'FieldSight', text: state.shareText, filename: 'fieldsight.png' });
+    if (r === 'downloaded') b.textContent = 'Saved to your downloads ✓';
+  }
   else if (act === 'zoomto') { closeSheet(); map.setView([+b.dataset.lat, +b.dataset.lng], +b.dataset.z); }
   else if (act === 'newtrip') { state.trip = { started: Date.now(), total: 0, m: {}, last: null }; saveTrip(); openTrip(); }
   else if (act === 'showroute') {
@@ -831,6 +920,7 @@ function leaveWelcome() {
 
 function startDriving() {
   state.mode = 'drive';
+  document.body.classList.add('driving');
   leaveWelcome();
   keepAwake();
   renderStripMessage('Finding GPS…');

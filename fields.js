@@ -479,6 +479,15 @@ export class FieldLayer {
     };
   }
 
+  // A field's outline as [[lat, lng], ...] rings (for share cards).
+  fieldRings(id) {
+    const g = this.grid, c = g?.comps[id];
+    if (!c) return null;
+    if (c.rings) return c.rings;
+    const toLL = (x, y) => [g.maxy - y / g.H * (g.maxy - g.miny), g.minx + x / g.W * (g.maxx - g.minx)];
+    return c.loops.map((loop) => { const r = []; for (let i = 0; i < loop.length; i += 2) r.push(toLL(loop[i], loop[i + 1])); return r; });
+  }
+
   select(id, at = null) {
     if (this.selected === id) return;
     const prev = this.selected;

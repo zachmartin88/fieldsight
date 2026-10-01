@@ -388,3 +388,71 @@ body.loading .loadbar {
 .emo-sm { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--c); font-size: 12px; }
 .tbar:has(.emo-sm) { grid-template-columns: 20px 108px 1fr 62px; }
 .region-bubble.compact { padding: 3px; }
+
+/* ================= share ================= */
+.sheet-actions.one { grid-template-columns: 1fr; padding: 0 18px 4px; margin-top: 0; }
+.share-btn { background: linear-gradient(90deg, #ffc53d, #ff8fc7 55%, #a98bff); color: #1a1022; }
+.card-preview { width: 100%; border-radius: 16px; display: block; box-shadow: 0 12px 30px -10px rgba(0,0,0,.7); }
+
+/* ================= crop cards album ================= */
+.album-head { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 4px 0 10px; }
+.album-head div { padding: 10px; border-radius: 12px; background: rgba(255,255,255,.045); border: 1px solid var(--line-soft); display: grid; }
+.album-head b { font-size: 22px; font-weight: 900; }
+.album-head span { font-size: 11px; color: var(--muted); }
+.cset { margin-top: 14px; }
+.cset header { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font-size: 14px; font-weight: 800; margin-bottom: 8px; }
+.cset header b { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cprog { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; }
+.cprog i { display: block; height: 100%; background: linear-gradient(90deg, #ffc53d, #ff8fc7); border-radius: 3px; }
+.cset.done header span:first-child::after { content: ' ✓'; color: var(--gold); }
+.cgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.ccard {
+  position: relative; aspect-ratio: 4 / 5; border-radius: 14px; padding: 8px 4px 6px;
+  display: grid; grid-template-rows: 1fr auto auto; justify-items: center; align-items: center;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--c) 92%, #fff), color-mix(in srgb, var(--c) 70%, #000));
+  border: 2.5px solid var(--r); box-shadow: 0 4px 14px -6px var(--r), inset 0 1px 0 rgba(255,255,255,.4);
+  overflow: hidden;
+}
+.ccard .art { font-size: 30px; filter: drop-shadow(0 2px 2px rgba(0,0,0,.25)); }
+.ccard .nm { font-size: 10px; font-weight: 800; color: #14110a; text-align: center; line-height: 1.1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ccard .stars { font-size: 9px; color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,.4); letter-spacing: 1px; }
+.ccard .stars em { font-style: normal; opacity: .3; }
+.ccard .gem { position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; border-radius: 2px; transform: rotate(45deg); background: var(--r); box-shadow: 0 0 6px var(--r); }
+.ccard.r-epic, .ccard.r-legendary { animation: shimmer 3s ease-in-out infinite; }
+.ccard.r-legendary::after { content: ''; position: absolute; inset: 0; background: linear-gradient(115deg, transparent 30%, rgba(255,255,255,.55) 45%, transparent 60%); background-size: 250% 100%; animation: sheen 2.6s linear infinite; }
+@keyframes sheen { from { background-position: 150% 0; } to { background-position: -100% 0; } }
+@keyframes shimmer { 50% { box-shadow: 0 4px 22px -2px var(--r), inset 0 1px 0 rgba(255,255,255,.4); } }
+.ccard.locked { background: repeating-linear-gradient(135deg, #1a1e25 0 8px, #161a20 8px 16px); border-style: dashed; border-color: color-mix(in srgb, var(--r) 55%, transparent); box-shadow: none; }
+.ccard.locked .q { font-size: 26px; font-weight: 900; color: rgba(255,255,255,.18); }
+.ccard.locked .nm { color: rgba(255,255,255,.25); }
+.stamps { display: flex; flex-wrap: wrap; gap: 5px; }
+.stamp { font-size: 11px; font-weight: 800; padding: 5px 7px; border-radius: 7px; border: 1.5px dashed rgba(255,255,255,.15); color: rgba(255,255,255,.3); letter-spacing: .04em; }
+.stamp.got { border: 1.5px solid var(--gold); color: #1a1408; background: var(--gold); transform: rotate(-3deg); }
+
+/* new card pop */
+.card-drop { position: fixed; inset: 0; z-index: 3000; display: grid; place-items: center; background: rgba(5,6,9,.55); animation: fadein .2s; }
+.card-drop.out { animation: fadeout .45s forwards; }
+.card-drop .burst { position: absolute; width: 520px; height: 520px; border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 8deg, color-mix(in srgb, var(--r) 70%, transparent) 8deg 14deg, transparent 14deg 30deg);
+  -webkit-mask: radial-gradient(circle, #000 20%, transparent 65%); mask: radial-gradient(circle, #000 20%, transparent 65%);
+  animation: spin 6s linear infinite; }
+.drop-card { position: relative; width: 190px; aspect-ratio: 4 / 5; border-radius: 22px; display: grid; grid-template-rows: 1fr auto auto auto; justify-items: center; padding: 14px 8px 14px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--c) 92%, #fff), color-mix(in srgb, var(--c) 70%, #000));
+  border: 4px solid var(--r); box-shadow: 0 0 40px var(--r), 0 20px 50px rgba(0,0,0,.6);
+  animation: flipin .6s cubic-bezier(.2,1.4,.4,1) both; }
+.drop-card .art { font-size: 84px; align-self: center; }
+.drop-card .nm { font-size: 20px; font-weight: 900; color: #14110a; }
+.drop-card .rar { font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: #14110a; opacity: .75; }
+.drop-card .stars { color: #fff; font-size: 16px; letter-spacing: 2px; text-shadow: 0 1px 2px rgba(0,0,0,.4); }
+.drop-card .stars em { font-style: normal; opacity: .3; }
+.drop-title { position: absolute; top: calc(50% - 190px); font-size: 30px; font-weight: 900; color: #fff; text-shadow: 0 2px 12px var(--r); animation: pop .5s .2s both; }
+@keyframes flipin { from { transform: rotateY(90deg) scale(.6); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes pop { from { transform: scale(.4); opacity: 0; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadein { from { opacity: 0; } }
+@keyframes fadeout { to { opacity: 0; } }
+
+.toast { position: fixed; z-index: 2500; left: 50%; top: calc(var(--safe-top) + 150px); transform: translateX(-50%);
+  background: rgba(14,16,20,.94); border: 1.5px solid var(--gold); color: #fff; font-weight: 800; font-size: 14px;
+  padding: 10px 16px; border-radius: 999px; box-shadow: 0 8px 24px rgba(0,0,0,.5); animation: pop .35s both; white-space: nowrap; }
+.toast.out { animation: fadeout .45s forwards; }
