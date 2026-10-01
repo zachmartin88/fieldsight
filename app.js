@@ -1364,6 +1364,37 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catc
   }
 }
 
+// Open on the person's general area (county-level zoom). Uses their real position only if
+// they've already allowed location; otherwise an approximate city-level spot from the network
+// (no permission prompt just for opening the app). Never overrides a link, a drive, or a map
+// they've already moved.
+async function locateGeneral() {
+  const untouched = () => state.mode === 'idle' && !moved;
+  let moved = false;
+  map.once('dragstart zoomstart', () => { moved = true; });
+  const go = (lat, lon) => {
+    if (!untouched() || !(lat > 24 && lat < 50 && lon > -125 && lon < -66)) return;   // lower 48 only
+    map.flyTo([lat, lon], 7, { duration: 1.4 });
+  };
+  try {
+    const perm = await navigator.permissions?.query({ name: 'geolocation' });
+    if (perm?.state === 'granted') {
+      navigator.geolocation.getCurrentPosition((p) => go(p.coords.latitude, p.coords.longitude), () => {}, { timeout: 8000, maximumAge: 600000 });
+      return;
+    }
+  } catch { /* Permissions API not supported: fall back to the network guess */ }
+  try {
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 5000);
+    const j = await (await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: ctl.signal })).json();
+    clearTimeout(t);
+    go(+j.latitude, +j.longitude);
+  } catch { /* stay on the whole-country view */ }
+}
+{
+  const q = new URLSearchParams(location.search);
+  if (!q.has('at') && !q.has('text') && !q.has('title') && !q.has('sim')) locateGeneral();
+}
+
 // Shareable spot: ?at=lat,lon opens the map there and inspects it.
 const at = new URLSearchParams(location.search).get('at')?.split(',').map(Number);
 if (at?.length === 2 && at.every(Number.isFinite)) {
