@@ -12,7 +12,7 @@ const STEPS = [
       ['#ffc928', '🌽'], ['#22c55e', '🫘'], ['#fb7a24', '🌾'], ['#ffc928', '🌽'], ['#a78bfa', '🌿'], ['#22c55e', '🫘'],
     ].map(([b, e]) => tile(b, e)).join('')}</div>`,
     title: 'Hi! I’m Kernel 🌽',
-    text: 'FieldSight shows what’s growing in every field across the lower 48, straight from <b>this season’s satellite crop map</b>.',
+    text: 'FieldSight shows what’s growing in fields across the lower 48, straight from <b>this season’s satellite crop map</b>.',
   },
   {
     art: `<div class="ob-strip"><div><small>◂ LEFT</small><b><i style="background:#ffc928">🌽</i>Corn</b><em>LIVE</em></div><div><small>RIGHT ▸</small><b><i style="background:#22c55e">🫘</i>Soybeans</b><em>LIVE</em></div></div>
