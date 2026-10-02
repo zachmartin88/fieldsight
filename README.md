@@ -33,8 +33,11 @@ URLs can be cached by the proxy and the offline cache.
 - **12+**: fields as vector shapes (hover, tap, spotlight a crop from the legend); **13+** uses USDA Crop
   Sequence Boundaries (official field outlines + per-field history) where available, traced shapes elsewhere
 
-State/county numbers are precomputed from the live crop map: `node tools/build-regions.mjs`
-(re-run when a new monthly map comes out).
+State/county numbers are precomputed from the live crop map (`node tools/build-regions.mjs`), with gaps
+filled from the latest annual map. **This refreshes itself**: `.github/workflows/refresh-data.yml` runs on the
+8th of each month, rebuilds when USDA has published a newer map (`tools/check-data.mjs` compares against
+`data/meta.json`), and publishes. Run it by hand from the Actions tab (with "force" to rebuild anyway). It also
+opens an issue the first time USDA's national field-boundary service is back online.
 
 ## More
 

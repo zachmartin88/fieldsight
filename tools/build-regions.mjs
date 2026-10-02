@@ -190,4 +190,8 @@ for (const [name, service, fields, offset, key, precision] of [
   console.log(name, feats.length, `${(fs.statSync(new URL(`${name}.json`, OUT)).size / 1e6).toFixed(2)} MB`);
 }
 fs.writeFileSync(new URL('crops.json', OUT), JSON.stringify(crops));
+// What this data was built from, so the monthly refresh can tell when USDA has published something new.
+fs.writeFileSync(new URL('meta.json', OUT), JSON.stringify({
+  live: layers.live?.layer ?? null, annual: layers.years[0] ?? null, source: src.layer, built: new Date().toISOString(),
+}, null, 2) + '\n');
 console.log('crops', Object.keys(crops.national).length, 'crops', `${(fs.statSync(new URL('crops.json', OUT)).size / 1e6).toFixed(2)} MB`);

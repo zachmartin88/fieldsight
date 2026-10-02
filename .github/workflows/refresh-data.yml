@@ -1,0 +1,69 @@
+# Keeps FieldSight's state/county crop data current.
+# Monthly: if USDA has published a newer crop map (a new in-season month or a new annual map),
+# rebuild data/*.json and publish (GitHub Pages redeploys on push). Also opens an issue the first
+# time USDA's national field-boundary service is back online.
+name: Refresh crop data
+
+on:
+  schedule:
+    - cron: '0 14 8 * *'      # 8th of each month, 14:00 UTC (new maps come out a few days after month end)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if no new crop map was published'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The crop-map server doesn't send its intermediate certificate.
+      NODE_EXTRA_CA_CERTS: proxy/incommon-rsa-server-ca-2.pem
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check for a newer crop map
+        id: check
+        run: node tools/check-data.mjs
+
+      - name: Rebuild state and county data
+        if: steps.check.outputs.changed == 'true' || inputs.force
+        run: node tools/build-regions.mjs
+
+      - name: Publish updated data
+        if: steps.check.outputs.changed == 'true' || inputs.force
+        run: |
+          if git diff --quiet -- data/; then
+            echo "No data changes." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "fieldsight-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git commit -m "Refresh crop data ($(jq -r '.source' data/meta.json))"
+          git push
+          echo "Published refreshed data from $(jq -r '.source' data/meta.json)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Announce USDA field boundaries are back
+        if: steps.check.outputs.csb == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="USDA field boundaries are back online"
+          if [ -z "$(gh issue list --state all --search "$title in:title" --json number --jq '.[0].number')" ]; then
+            gh issue create --title "$title" --body "USDA's national Crop Sequence Boundaries service is responding again. FieldSight uses it automatically (official field outlines from zoom 13, everywhere, not just Minnesota). Nothing to do. Close this once you've had a look."
+          fi
