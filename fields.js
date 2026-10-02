@@ -10,6 +10,7 @@
 import { rgbToCode, isAg, prettyName, wmsFetch, proxyUrl, slowNet } from './data.js';
 import { cropColor, cropEmoji, cropLabel, categoryOf } from './palette.js';
 // Spotlight works by category (the same groups as the key and legend).
+const PASTURE = '#a89a76';
 const sameGroup = (a, b) => a === b || (categoryOf(a) && categoryOf(a) === categoryOf(b));
 
 export const FIELD_MIN_ZOOM = 12;
@@ -308,8 +309,11 @@ export class FieldLayer {
     const midLat = (miny + maxy) / 2;
     const wM = (maxx - minx) * 111320 * Math.cos(midLat * Math.PI / 180), hM = (maxy - miny) * 111320;
     // Weak signal: a smaller crop image for the view (coarser, but loads much faster).
-    const scale = Math.max(1, Math.max(wM, hM) / METERS_PER_PX / (slowNet() ? 450 : MAX_PX));
-    const W = Math.max(32, Math.round(wM / METERS_PER_PX / scale)), H = Math.max(32, Math.round(hM / METERS_PER_PX / scale));
+    // Detail follows zoom: zoomed out a bit you see field-sized blocks, zoomed in the fine edges.
+    const zq = this.map.getZoom();
+    const mpp = zq <= 12 ? 60 : zq === 13 ? 30 : zq === 14 ? 15 : METERS_PER_PX;
+    const scale = Math.max(1, Math.max(wM, hM) / mpp / (slowNet() ? 450 : MAX_PX));
+    const W = Math.max(32, Math.round(wM / mpp / scale)), H = Math.max(32, Math.round(hM / mpp / scale));
 
     const id = ++this.req;
     this.onLoading(true);
@@ -350,13 +354,14 @@ export class FieldLayer {
       // Zoomed out a bit, small specks are just noise: clean harder and drop tiny patches.
       const zNow = this.map.getZoom();
       despeckle(codes, W, H);
-      if (zNow <= 13) despeckle(codes, W, H);
+      despeckle(codes, W, H);
+      majority5(codes, W, H);   // wider clean-up: field edges, levees and ditches stop reading as strips of other crops
       // Smallest patch worth drawing, in acres: bigger when zoomed out so the map stays calm.
       const pxAc = ((maxx - minx) * 111320 * Math.cos(midLat * Math.PI / 180) / W) * ((maxy - miny) * 111320 / H) / 4046.86;
-      const minAcres = zNow <= 12 ? 25 : zNow === 13 ? 6 : 1.5;
+      const minAcres = zNow <= 12 ? 60 : zNow === 13 ? 30 : zNow === 14 ? 10 : 3;
       MIN_FIELD_PX = Math.max(4, Math.round(minAcres / pxAc));
       // Fold tiny patches into the field around them instead of drawing hundreds of specks.
-      absorbSmall(codes, W, H, MIN_FIELD_PX);
+      absorbSmall(codes, W, H, MIN_FIELD_PX, 1.6);   // also folds in slivers ≤ ~3 pixels wide
       let { comp, comps } = components(codes, W, H);
       traceOutlines(comp, comps, W, H);
       let fieldSource = 'traced';
@@ -414,10 +419,15 @@ export class FieldLayer {
     const col = cut ? mixColor(base, '#8a6a48', Math.min(0.42, cut * 0.45)) : base;
     const sel = id === this.selected, hov = id === this.hovered;
     const dim = this.focus != null && !sameGroup(c.code, this.focus) && !sel;
-    const grassy = c.code === 176 || c.code === 171 || c.code === 61;   // pasture, grass, fallow: soft
+    // Pasture, grass and fallow are one soft, flat background tint: same color, no outlines, no labels.
+    const grassy = c.code === 176 || c.code === 171 || c.code === 61;
+    if (grassy && !sel && !hov) {
+      return { fillColor: PASTURE, fillOpacity: dim ? 0.04 : this.solid ? 0.3 : 0.22, stroke: false, weight: 0 };
+    }
     return {
-      fillColor: col,
-      fillOpacity: dim ? 0.06 : sel ? 0.9 : hov ? 0.85 : grassy ? (this.solid ? 0.38 : 0.28) : this.solid ? 0.72 : 0.58,
+      fillColor: grassy ? PASTURE : col,
+      fillOpacity: dim ? 0.06 : sel ? 0.9 : hov ? 0.85 : this.solid ? 0.72 : 0.58,
+      stroke: true,
       color: sel || hov ? '#ffffff' : shade(col, 0.5),
       weight: sel ? 3.5 : hov ? 2.5 : 1,
       opacity: dim ? 0.2 : 1,
@@ -468,6 +478,9 @@ export class FieldLayer {
     const cands = [];
     for (let id = 0; id < n; id++) {
       if (!this.polys[id] || !(seen[id] * pxArea > 2600 && bestI[id] >= 0)) continue;
+      if ([176, 171, 61].includes(g.comps[id].code)) continue;   // background land doesn't get labels
+      // Only label fields wide enough to hold a label (no labels on thin strips along roads).
+      if (bestD[id] * Math.sqrt(pxArea) < 16) continue;
       if (this.focus != null && !sameGroup(g.comps[id].code, this.focus) && id !== this.selected) continue;
       cands.push(id);
     }
@@ -476,7 +489,7 @@ export class FieldLayer {
     cands.sort((p, q) => (q === this.selected) - (p === this.selected) || soft(p) - soft(q) || seen[q] - seen[p]);
 
     // Fewer, well-spaced labels when zoomed out; more as you zoom in.
-    const zl = map.getZoom(), maxLabels = zl <= 12 ? 8 : zl === 13 ? 12 : zl === 14 ? 16 : 22, gap = zl <= 13 ? 22 : 12;
+    const zl = map.getZoom(), maxLabels = zl <= 13 ? 8 : zl === 14 ? 12 : 16, gap = zl <= 13 ? 24 : 14;
     const taken = [];
     for (const id of cands) {
       if (taken.length >= maxLabels) break;
@@ -550,11 +563,17 @@ export class FieldLayer {
 
 // Patches smaller than minPx take the crop (or background) that surrounds them most. Small holes of
 // "not farmland" inside a field are filled in too, so fields read as solid shapes.
-function absorbSmall(codes, W, H, minPx) {
+function absorbSmall(codes, W, H, minPx, minDepth = 0) {
   fillHoles(codes, W, H, minPx);
   for (let pass = 0; pass < 2; pass++) {
     const { comp, comps } = components(codes, W, H);
-    const small = comps.map((c) => c.count < minPx);
+    // Thin slivers (no point deeper than minDepth pixels from their edge) count as small too.
+    const deep = new Float32Array(comps.length);
+    if (minDepth) {
+      const d = distanceToEdge(comp, W, H);
+      for (let i = 0; i < W * H; i++) if (comp[i] >= 0 && d[i] > deep[comp[i]]) deep[comp[i]] = d[i];
+    }
+    const small = comps.map((c, k) => c.count < minPx || (minDepth && deep[k] < minDepth));
     if (!small.some(Boolean)) return;
     const votes = comps.map(() => new Map());
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -568,6 +587,21 @@ function absorbSmall(codes, W, H, minPx) {
     }
     const into = votes.map((m) => { let best = 0, n = -1; for (const [v, k] of m) if (k > n) { n = k; best = v; } return best; });
     for (let i = 0; i < W * H; i++) { const c = comp[i]; if (c >= 0 && small[c]) codes[i] = into[c]; }
+  }
+}
+
+// 5×5 majority: each pixel takes the most common value around it when that value clearly wins.
+function majority5(codes, W, H) {
+  const src = codes.slice(), hist = new Uint16Array(256), touched = [];
+  for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) {
+    touched.length = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const v = src[(y + dy) * W + x + dx];
+      if (!hist[v]++) touched.push(v);
+    }
+    let best = src[y * W + x], n = 0;
+    for (const v of touched) { if (hist[v] > n) { n = hist[v]; best = v; } hist[v] = 0; }
+    if (n >= 13) codes[y * W + x] = best;
   }
 }
 
