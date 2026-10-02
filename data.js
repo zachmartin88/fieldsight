@@ -112,7 +112,11 @@ function readTiff(buf) {
   const offs = tags[273], counts = tags[279];
   const out = new Uint8Array(w * h * spp);
   let p = 0;
-  for (let i = 0; i < offs.length; i++) { out.set(new Uint8Array(buf, offs[i], counts[i]), p); p += counts[i]; }
+  // The last strip can be padded past the image height; copy only what fits.
+  for (let i = 0; i < offs.length && p < out.length; i++) {
+    const n = Math.min(counts[i], out.length - p, buf.byteLength - offs[i]);
+    if (n > 0) { out.set(new Uint8Array(buf, offs[i], n), p); p += n; }
+  }
   return { w, h, spp, px: out };
 }
 

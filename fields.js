@@ -8,13 +8,15 @@
 // CropTiles (zoomed out): the same map as tiles, recolored into FieldSight's palette so colors match
 // at every zoom.
 import { rgbToCode, isAg, prettyName, wmsFetch, proxyUrl, slowNet } from './data.js';
-import { cropColor, cropEmoji, cropLabel } from './palette.js';
+import { cropColor, cropEmoji, cropLabel, categoryOf } from './palette.js';
+// Spotlight works by category (the same groups as the key and legend).
+const sameGroup = (a, b) => a === b || (categoryOf(a) && categoryOf(a) === categoryOf(b));
 
 export const FIELD_MIN_ZOOM = 12;
 export const CSB_MIN_ZOOM = 13;   // official USDA field outlines from here in
 const METERS_PER_PX = 7;   // request resolution; source data is 10-30 m
 const MAX_PX = 900;
-const MIN_FIELD_PX = 5;    // ignore specks smaller than this (about a quarter acre)
+let MIN_FIELD_PX = 5;      // ignore specks smaller than this; raised when zoomed out (see refresh)
 
 // ---------- color helpers ----------
 
@@ -247,8 +249,10 @@ export class FieldLayer {
 
   relabel() { this.placeLabels(); }
 
-  setSource(source) {
+  // fallback: the USDA annual map, used wherever the live map has no data (missing tiles, clouds).
+  setSource(source, fallback = null) {
     this.source = source;
+    this.fallback = fallback;
     this.grid = null;
     this.selected = null;
     this.refresh(true);
@@ -310,24 +314,49 @@ export class FieldLayer {
     const id = ++this.req;
     this.onLoading(true);
     try {
-      const query = `SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=${this.source.layer}&STYLES=&SRS=EPSG:4326` +
-        `&BBOX=${minx.toFixed(6)},${miny.toFixed(6)},${maxx.toFixed(6)},${maxy.toFixed(6)}&WIDTH=${W}&HEIGHT=${H}&FORMAT=image/png`;
-      const res = await wmsFetch(this.source.url, query, 15000);
-      if (!res.ok || !(res.headers.get('content-type') || '').includes('png')) throw new Error('crop image failed');
-      const bmp = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+      const bbox = `${minx.toFixed(6)},${miny.toFixed(6)},${maxx.toFixed(6)},${maxy.toFixed(6)}`;
+      // Crop codes for the view; NO_DATA where the map is blank (white) or cloudy.
+      const NO_DATA = 255;
+      const read = async (src) => {
+        const query = `SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=${src.layer}&STYLES=&SRS=EPSG:4326&BBOX=${bbox}&WIDTH=${W}&HEIGHT=${H}&FORMAT=image/png`;
+        const res = await wmsFetch(src.url, query, 15000);
+        if (!res.ok || !(res.headers.get('content-type') || '').includes('png')) throw new Error('crop image failed');
+        const bmp = await createImageBitmap(await res.blob(), { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+        const cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        const ctx = cv.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(bmp, 0, 0);
+        const px = ctx.getImageData(0, 0, W, H).data, out = new Uint8Array(W * H);
+        let gaps = 0;
+        for (let i = 0; i < W * H; i++) {
+          const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2], a = px[i * 4 + 3];
+          if (a < 10 || (r > 235 && g > 235 && b > 235)) { out[i] = NO_DATA; gaps++; continue; }
+          const c = rgbToCode(r, g, b);
+          out[i] = c == null ? NO_DATA : c;
+          if (c == null) gaps++;
+        }
+        return { codes: out, gaps };
+      };
+      const live = await read(this.source);
       if (id !== this.req) return;
-      const cv = document.createElement('canvas');
-      cv.width = W; cv.height = H;
-      const ctx = cv.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(bmp, 0, 0);
-      const px = ctx.getImageData(0, 0, W, H).data;
-
-      const codes = new Uint8Array(W * H);
-      for (let i = 0; i < W * H; i++) {
-        const c = rgbToCode(px[i * 4], px[i * 4 + 1], px[i * 4 + 2]);
-        codes[i] = c != null && isAg(c) ? c : 0;   // only farmland becomes fields
+      // Fill the live map's gaps from the USDA annual map, pixel by pixel.
+      if (this.fallback && live.gaps > W * H * 0.01) {
+        const fb = await read(this.fallback).catch(() => null);
+        if (id !== this.req) return;
+        if (fb) for (let i = 0; i < W * H; i++) if (live.codes[i] === NO_DATA) live.codes[i] = fb.codes[i];
       }
+      const codes = live.codes;
+      for (let i = 0; i < W * H; i++) if (codes[i] === NO_DATA || !isAg(codes[i])) codes[i] = 0;   // only farmland becomes fields
+      // Zoomed out a bit, small specks are just noise: clean harder and drop tiny patches.
+      const zNow = this.map.getZoom();
       despeckle(codes, W, H);
+      if (zNow <= 13) despeckle(codes, W, H);
+      // Smallest patch worth drawing, in acres: bigger when zoomed out so the map stays calm.
+      const pxAc = ((maxx - minx) * 111320 * Math.cos(midLat * Math.PI / 180) / W) * ((maxy - miny) * 111320 / H) / 4046.86;
+      const minAcres = zNow <= 12 ? 25 : zNow === 13 ? 6 : 1.5;
+      MIN_FIELD_PX = Math.max(4, Math.round(minAcres / pxAc));
+      // Fold tiny patches into the field around them instead of drawing hundreds of specks.
+      absorbSmall(codes, W, H, MIN_FIELD_PX);
       let { comp, comps } = components(codes, W, H);
       traceOutlines(comp, comps, W, H);
       let fieldSource = 'traced';
@@ -381,15 +410,16 @@ export class FieldLayer {
 
   styleFor(id, c = this.grid.comps[id]) {
     const base = cropColor(c.code), cut = this.harvest[c.code] || 0;
-    const col = cut ? mixColor(base, '#8a6a48', Math.min(0.85, cut * 0.85)) : base;
+    // Harvest fades toward soil, but never so far the crop color stops being recognizable.
+    const col = cut ? mixColor(base, '#8a6a48', Math.min(0.42, cut * 0.45)) : base;
     const sel = id === this.selected, hov = id === this.hovered;
-    const dim = this.focus != null && c.code !== this.focus && !sel;
-    const grassy = c.code === 176 || c.code === 171;
+    const dim = this.focus != null && !sameGroup(c.code, this.focus) && !sel;
+    const grassy = c.code === 176 || c.code === 171 || c.code === 61;   // pasture, grass, fallow: soft
     return {
       fillColor: col,
-      fillOpacity: dim ? 0.06 : sel ? 0.92 : hov ? 0.88 : grassy ? (this.solid ? 0.42 : 0.3) : this.solid ? 0.82 : 0.62,
-      color: sel || hov ? '#ffffff' : shade(col, 0.55),
-      weight: sel ? 3.5 : hov ? 2.5 : 1.3,
+      fillOpacity: dim ? 0.06 : sel ? 0.9 : hov ? 0.85 : grassy ? (this.solid ? 0.38 : 0.28) : this.solid ? 0.72 : 0.58,
+      color: sel || hov ? '#ffffff' : shade(col, 0.5),
+      weight: sel ? 3.5 : hov ? 2.5 : 1,
       opacity: dim ? 0.2 : 1,
     };
   }
@@ -438,14 +468,18 @@ export class FieldLayer {
     const cands = [];
     for (let id = 0; id < n; id++) {
       if (!this.polys[id] || !(seen[id] * pxArea > 2600 && bestI[id] >= 0)) continue;
-      if (this.focus != null && g.comps[id].code !== this.focus && id !== this.selected) continue;
+      if (this.focus != null && !sameGroup(g.comps[id].code, this.focus) && id !== this.selected) continue;
       cands.push(id);
     }
-    cands.sort((p, q) => (q === this.selected) - (p === this.selected) || seen[q] - seen[p]);
+    // Label crops first; pasture, grass and fallow only get labels if there's room left.
+    const soft = (id) => [176, 171, 61].includes(g.comps[id].code);
+    cands.sort((p, q) => (q === this.selected) - (p === this.selected) || soft(p) - soft(q) || seen[q] - seen[p]);
 
+    // Fewer, well-spaced labels when zoomed out; more as you zoom in.
+    const zl = map.getZoom(), maxLabels = zl <= 12 ? 8 : zl === 13 ? 12 : zl === 14 ? 16 : 22, gap = zl <= 13 ? 22 : 12;
     const taken = [];
     for (const id of cands) {
-      if (taken.length >= 40) break;
+      if (taken.length >= maxLabels) break;
       const i = bestI[id], x = i % g.W, y = (i - x) / g.W;
       const lat = g.maxy - (y + 0.5) / g.H * (g.maxy - g.miny), lng = g.minx + (x + 0.5) / g.W * (g.maxx - g.minx);
       const p = map.latLngToContainerPoint([lat, lng]);
@@ -453,7 +487,7 @@ export class FieldLayer {
       const w = name.length * 7.2 + 48, h = 28;
       const r = [p.x - w / 2, p.y - h / 2, p.x + w / 2, p.y + h / 2];
       if (r[0] < 6 || r[1] < inset.top + 6 || r[2] > size.x - 6 || r[3] > size.y - inset.bottom - 6) continue;
-      if (taken.some((t) => r[0] < t[2] + 6 && r[2] > t[0] - 6 && r[1] < t[3] + 6 && r[3] > t[1] - 6)) continue;
+      if (taken.some((t) => r[0] < t[2] + gap && r[2] > t[0] - gap && r[1] < t[3] + gap && r[3] > t[1] - gap)) continue;
       taken.push(r);
       L.marker([lat, lng], {
         pane: this.labelPane, interactive: false, keyboard: false,
@@ -513,6 +547,52 @@ export class FieldLayer {
 }
 
 // ---------- image processing ----------
+
+// Patches smaller than minPx take the crop (or background) that surrounds them most. Small holes of
+// "not farmland" inside a field are filled in too, so fields read as solid shapes.
+function absorbSmall(codes, W, H, minPx) {
+  fillHoles(codes, W, H, minPx);
+  for (let pass = 0; pass < 2; pass++) {
+    const { comp, comps } = components(codes, W, H);
+    const small = comps.map((c) => c.count < minPx);
+    if (!small.some(Boolean)) return;
+    const votes = comps.map(() => new Map());
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, c = comp[i];
+      if (c < 0 || !small[c]) continue;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) {
+        if (j < 0 || comp[j] === c) continue;
+        const v = codes[j], m = votes[c];
+        m.set(v, (m.get(v) || 0) + 1);
+      }
+    }
+    const into = votes.map((m) => { let best = 0, n = -1; for (const [v, k] of m) if (k > n) { n = k; best = v; } return best; });
+    for (let i = 0; i < W * H; i++) { const c = comp[i]; if (c >= 0 && small[c]) codes[i] = into[c]; }
+  }
+}
+
+function fillHoles(codes, W, H, minPx) {
+  const seen = new Uint8Array(W * H), stack = [], members = [];
+  for (let s = 0; s < W * H; s++) {
+    if (codes[s] || seen[s]) continue;
+    members.length = 0; stack.push(s); seen[s] = 1;
+    const votes = new Map();
+    let edge = false;
+    while (stack.length) {
+      const i = stack.pop(); members.push(i);
+      const x = i % W, y = (i - x) / W;
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) edge = true;
+      for (const j of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, y > 0 ? i - W : -1, y < H - 1 ? i + W : -1]) {
+        if (j < 0) continue;
+        if (!codes[j]) { if (!seen[j]) { seen[j] = 1; stack.push(j); } } else votes.set(codes[j], (votes.get(codes[j]) || 0) + 1);
+      }
+    }
+    if (edge || members.length >= minPx || !votes.size) continue;
+    let best = 0, n = -1;
+    for (const [v, k] of votes) if (k > n) { n = k; best = v; }
+    for (const i of members) codes[i] = best;
+  }
+}
 
 // Replace lone pixels with the crop that surrounds them.
 function despeckle(codes, W, H) {

@@ -7,7 +7,7 @@ import { cropColor, cropEmoji, categoryOf } from './palette.js';
 import { mixColor } from './fields.js';
 
 export const STATE_MAX_ZOOM = 6;
-export const COUNTY_MAX_ZOOM = 10;
+export const COUNTY_MAX_ZOOM = 11;
 // Not counted as "what's planted": grassland/pasture and idle fallow ground.
 const GRASS = new Set([176, 171, 61]);
 

@@ -44,7 +44,11 @@ function readTiff(buf) {
   const w = tags[256][0], h = tags[257][0], spp = (tags[277] || [1])[0];
   const out = new Uint8Array(w * h * spp);
   let p = 0;
-  tags[273].forEach((off, i) => { out.set(new Uint8Array(buf, off, tags[279][i]), p); p += tags[279][i]; });
+  // The last strip can be padded past the image height; copy only what fits.
+  tags[273].forEach((off, i) => {
+    const n = Math.min(tags[279][i], out.length - p, buf.byteLength - off);
+    if (n > 0) { out.set(new Uint8Array(buf, off, n), p); p += n; }
+  });
   return { w, h, spp, px: out };
 }
 
@@ -64,7 +68,7 @@ async function cropGrid(src) {
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
           const k = y * w + x;
           const c = t.spp >= 3 ? rgbToCode(t.px[k * t.spp], t.px[k * t.spp + 1], t.px[k * t.spp + 2]) : t.px[k];
-          codes[(ty + y) * W + tx + x] = c ?? 0;
+          codes[(ty + y) * W + tx + x] = c == null || c === 81 ? 0 : c;
         }
         process.stdout.write('.');
         break;
@@ -133,6 +137,14 @@ const layers = await discoverLayers();
 const src = layers.live ? { base: LIVE_WMS, layer: layers.live.layer } : { base: ANNUAL_WMS, layer: `cdl_${layers.years[0]}` };
 console.log('crop map:', src.layer, `${W}×${H}`);
 const codes = await cropGrid(src);
+// Where the live map has gaps (missing tiles, clouds), use the latest USDA annual map instead.
+if (layers.live && layers.years.length) {
+  let gaps = 0;
+  for (let i = 0; i < codes.length; i++) if (!codes[i]) gaps++;
+  console.log(`live map gaps: ${(gaps / codes.length * 100).toFixed(1)}% of the grid; filling from cdl_${layers.years[0]}`);
+  const annual = await cropGrid({ base: ANNUAL_WMS, layer: `cdl_${layers.years[0]}` });
+  for (let i = 0; i < codes.length; i++) if (!codes[i]) codes[i] = annual[i];
+}
 
 fs.mkdirSync(OUT, { recursive: true });
 const crops = { source: src.layer, national: {}, states: {}, top: {} };

@@ -142,7 +142,8 @@ function setCrop(which) {
   if (crop.tiles) { map.removeLayer(crop.tiles); crop.tiles = null; }
   if (src) {
     crop.tiles = new CropTiles({ source: src, pane: 'fields', opacity: 0.9 });
-    fields.setSource(src);
+    // Where the live map has gaps, fields fall back to the USDA annual map.
+    fields.setSource(src, which === 'live' && state.layers?.years?.length ? { url: ANNUAL_WMS, layer: `cdl_${state.layers.years[0]}` } : null);
   }
   fields.setEnabled(!!src);
   regions.setEnabled(!!src);
@@ -152,7 +153,8 @@ function setCrop(which) {
 // Zoom tiers: state/county summaries (≤10), crop-colored detail (11), individual fields (≥12).
 function syncCropZoom() {
   const z = map.getZoom();
-  const detail = z > COUNTY_MAX_ZOOM && z < FIELD_MIN_ZOOM;
+  // The raw square-by-square crop map is never shown (too noisy); counties hand straight over to fields.
+  const detail = false;
   if (crop.tiles) (detail ? crop.tiles.addTo(map) : map.removeLayer(crop.tiles));
   els.mapHint.hidden = !(z < FIELD_MIN_ZOOM && crop.which !== 'none');
   els.mapHint.textContent = z <= COUNTY_MAX_ZOOM ? 'Tap a state or county · zoom in for fields' : 'Zoom in a little more for fields';
@@ -208,17 +210,23 @@ function renderLegend(stats) {
     if (state.focus != null) { state.focus = null; fields.setFocus(null); regions.setFocus(null); }
     return;
   }
+  // The legend always speaks in the same categories as the colors and the key.
+  const grouped = new Map();
+  for (const r of stats) {
+    const k = categoryOf(r.code)?.codes[0] ?? r.code;
+    grouped.set(k, (grouped.get(k) || 0) + r.acres);
+  }
+  stats = [...grouped].map(([code, acres]) => ({ code, acres })).sort((a, b) => b.acres - a.acres);
   const total = stats.reduce((t, r) => t + r.acres, 0);
-  // Zoomed out, keep the legend to the few crops that define the region.
-  const top = stats.filter((r) => r.acres / total >= 0.01).slice(0, map.getZoom() < FIELD_MIN_ZOOM ? 4 : 8);
+  // Zoomed out, keep the legend to the few categories that define the region.
+  const top = stats.filter((r) => r.acres / total >= 0.01).slice(0, map.getZoom() < FIELD_MIN_ZOOM ? 4 : 6);
   if (state.focus != null && !top.some((r) => r.code === state.focus)) top.push({ code: state.focus, acres: 0 });
   const appeared = els.legend.hidden;
   els.legend.hidden = false;
   // Labels were placed before the legend showed up; place them again clear of it.
   if (appeared) requestAnimationFrame(() => fields.relabel());
   // Zoomed out, legend entries are broad categories ("Wheat & grains"); zoomed in, single crops.
-  const broad = map.getZoom() < FIELD_MIN_ZOOM;
-  const look = (code) => (broad && categoryOf(code)
+  const look = (code) => (categoryOf(code)
     ? { color: categoryOf(code).color, emoji: categoryOf(code).emoji, name: categoryOf(code).name }
     : { color: cropColor(code), emoji: cropEmoji(code), name: prettyName(code) });
   els.legend.innerHTML = top.map((r) => `<button data-code="${r.code}" class="${r.code === state.focus ? 'on' : ''}" style="--c:${look(r.code).color}">
