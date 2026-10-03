@@ -151,6 +151,7 @@ export class RegionLayer {
   // Bubbles like "🌽 45%": every state; counties from zoom 8, biggest cropland first, no overlaps.
   placeLabels() {
     this.labels.clearLayers();
+    if (!this.map.getSize().x || !this.map.getSize().y) return;
     const level = this.level, z = this.map.getZoom();
     if (!level || (level === 'counties' && z < 8)) return;
     const fc = this.fc[level];

@@ -1,0 +1,25 @@
+{
+  "appId": "com.zmrtn.fieldsight",
+  "appName": "FieldSight",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0d0f12",
+    "scheme": "FieldSight"
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 900,
+      "launchAutoHide": true,
+      "backgroundColor": "#0d0f12",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "overlaysWebView": true
+    },
+    "LocalNotifications": {
+      "iconColor": "#e8c170"
+    }
+  }
+}

@@ -3,6 +3,7 @@
 import { prettyName, slowNet } from './data.js';
 import { cropColor, cropEmoji, shortName } from './palette.js';
 import { parseColor } from './fields.js';
+import { isNative, nativeShareImage } from './native.js';
 
 const W = 1080, H = 1350;
 const SITE = 'zachmartin88.github.io/fieldsight';
@@ -168,6 +169,9 @@ export async function fieldCard(info) {
 
 // Share a canvas through the share sheet, or download it.
 export async function shareCanvas(cv, { title, text, filename }) {
+  if (isNative) {
+    try { await nativeShareImage(cv, { title, text: `${text} https://${SITE}/`, filename }); return 'shared'; } catch { return 'cancelled'; }
+  }
   const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
   const file = new File([blob], filename, { type: 'image/png' });
   const data = { files: [file], title, text: `${text} https://${SITE}/` };

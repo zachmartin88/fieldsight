@@ -298,6 +298,7 @@ export class FieldLayer {
   }
 
   async refresh(force = false) {
+    if (!this.map.getSize().x || !this.map.getSize().y) return;
     if (!this.enabled || !this.source || this.map.getZoom() < FIELD_MIN_ZOOM) {
       if (this.grid) this.clear();
       return;
@@ -446,7 +447,8 @@ export class FieldLayer {
   placeLabels() {
     const g = this.grid;
     this.labels.clearLayers();
-    if (!g) return;
+    // A hidden or not-yet-laid-out map (0×0) can't place labels; wait for the next move.
+    if (!g || !this.map.getSize().x || !this.map.getSize().y) return;
     const map = this.map, size = map.getSize(), inset = this.insets();
     const corners = [[0, inset.top], [size.x, inset.top], [0, size.y - inset.bottom], [size.x, size.y - inset.bottom]]
       .map(([x, y]) => map.containerPointToLatLng([x, y]));

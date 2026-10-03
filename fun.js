@@ -1,6 +1,7 @@
 // The fun layer: sounds, haptics, Kernel the mascot, lifetime stats and milestone badges.
 import { prettyName, isAg } from './data.js';
 import { cropEmoji, categoryOf } from './palette.js';
+import { isNative, nativeHaptic } from './native.js';
 
 const get = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } };
 const put = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* full or private */ } };
@@ -44,7 +45,9 @@ const BUZZ = { pop: 12, flip: 8, ding: [20, 40, 20], card: [30, 50, 30, 50, 60],
 
 export function fx(kind) {
   if (settings.sound) SOUNDS[kind]?.();
-  if (settings.buzz && navigator.vibrate) navigator.vibrate(BUZZ[kind] ?? 10);
+  // iPhone app: real haptics (iPhone browsers don't support vibration at all).
+  if (settings.buzz && isNative) nativeHaptic(kind);
+  else if (settings.buzz && navigator.vibrate) navigator.vibrate(BUZZ[kind] ?? 10);
 }
 
 // ---------- Kernel, the mascot ----------

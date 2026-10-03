@@ -15,6 +15,7 @@ import { fx, kernel, settings, stats, saveStats, addMiles, checkBadges, badgesHt
 import { bingoCard, bingoSpot, bingoHtml, guessRound, satelliteHtml, cropOfTheDay, cropFacts, cropBlurb, countyFacts } from './games.js';
 import { SeasonLayer, season } from './season.js';
 import { showOnboarding, onboarded } from './onboarding.js';
+import { isNative, nativeSpeak, KeepAwake, StatusBar, startBackgroundLocation, scheduleDailyCrops, cancelDailyCrops } from './native.js';
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -374,6 +375,7 @@ const angleDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
 
 // Keep the car below center so more of the road ahead is visible under the HUD.
 function follow(animate) {
+  if (!map.getSize().x || !map.getSize().y) return;   // map not laid out (hidden / launching)
   const f = state.fix, z = map.getZoom() < 14 ? 16 : map.getZoom();
   if (state.headingUp && state.heading != null) map.setBearing(-state.heading);
   const h = (state.headingUp ? state.heading ?? 0 : 0) * Math.PI / 180, d = map.getSize().y * 0.18;
@@ -1118,6 +1120,7 @@ function openMenu() {
       <button data-act="tog" data-k="buzz" class="${settings.buzz ? 'on' : ''}">📳 Buzz</button>
       <button data-act="tog" data-k="mascot" class="${settings.mascot ? 'on' : ''}">🌽 Kernel</button>
     </div>
+    ${isNative ? `<button data-act="remind"><b>🔔 Daily crop reminder</b><span>${localGet('fs.remind') === '1' ? 'On · 9 am, tap to turn off' : 'Off · a new crop to find every morning'}</span></button>` : ''}
   </nav>`);
 }
 els.menuBtn.addEventListener('click', () => (state.sheet === 'menu' ? closeSheet() : openMenu()));
@@ -1231,6 +1234,12 @@ els.sheetBody.addEventListener('click', async (e) => {
     if (settings[b.dataset.k]) { fx('pop'); if (b.dataset.k === 'mascot') kernel('Hi again! 👋'); }
   }
   else if (act === 'bingo') openBingo();
+  else if (act === 'remind') {
+    if (localGet('fs.remind') === '1') { await cancelDailyCrops(); localSet('fs.remind', '0'); toast('🔕 Daily reminder off'); }
+    else if (await scheduleDailyCrops(cropOfTheDay, (c) => `${cropEmoji(c)} ${prettyName(c)}`)) { localSet('fs.remind', '1'); toast('🔔 You\'ll get a new crop every morning at 9'); }
+    else toast('Notifications are off for FieldSight in Settings');
+    openMenu();
+  }
   else if (act === 'lb') openLeaderboard();
   else if (act === 'rename') {
     const n = prompt('Pick a nickname (2–18 letters or numbers):', nickname());
@@ -1289,7 +1298,9 @@ els.sheetBody.addEventListener('click', async (e) => {
 // ---------- voice ----------
 
 function speak(text) {
-  if (!state.voice || !('speechSynthesis' in window)) return;
+  if (!state.voice) return;
+  if (isNative) { nativeSpeak(text); return; }   // keeps talking with the screen locked
+  if (!('speechSynthesis' in window)) return;
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1.02;
   speechSynthesis.cancel();
@@ -1323,6 +1334,7 @@ els.voiceBtn.setAttribute('aria-pressed', String(state.voice));
 
 let wakeLock = null;
 async function keepAwake() {
+  if (isNative) { KeepAwake.keepAwake().catch(() => {}); return; }
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* not supported */ }
 }
 document.addEventListener('visibilitychange', () => {
@@ -1349,6 +1361,14 @@ function startDriving() {
   state.trip.last = null;   // don't count the gap since the last drive
 
   if (new URLSearchParams(location.search).has('sim')) return simulate();
+  // iPhone app: location that keeps working with the screen locked (so voice keeps naming crops).
+  if (isNative) {
+    startBackgroundLocation(onFix, (err) => {
+      setStatus(err?.code === 'NOT_AUTHORIZED' ? 'Location blocked' : 'No GPS signal', 'err');
+      if (err?.code === 'NOT_AUTHORIZED') renderStripMessage('Location is off for FieldSight. Turn it on in Settings › FieldSight › Location.', false);
+    }).catch(() => renderStripMessage('Couldn\'t start location.', false));
+    return;
+  }
   if (!('geolocation' in navigator)) return renderStripMessage('This browser has no GPS access', false);
   navigator.geolocation.watchPosition(
     (p) => onFix({
@@ -1395,6 +1415,12 @@ function simulate() {
 }
 
 document.body.classList.add('welcoming');
+if (isNative) {
+  document.body.classList.add('native');
+  StatusBar.setStyle({ style: 'DARK' }).catch(() => {});
+  // Re-schedule reminders now and then so the next two weeks always have the right crop.
+  if (localGet('fs.remind') === '1') scheduleDailyCrops(cropOfTheDay, (c) => `${cropEmoji(c)} ${prettyName(c)}`).catch(() => {});
+}
 {
   // A different fun fact on the welcome card each visit.
   const f = randomFact();
@@ -1449,7 +1475,8 @@ async function locateGeneral() {
   map.once('dragstart zoomstart', () => { moved = true; });
   const go = (lat, lon) => {
     if (!untouched() || !(lat > 24 && lat < 50 && lon > -125 && lon < -66)) return;   // lower 48 only
-    map.flyTo([lat, lon], 7, { duration: 1.4 });
+    if (map.getSize().x) map.flyTo([lat, lon], 7, { duration: 1.4 });
+    else map.setView([lat, lon], 7, { animate: false });
   };
   try {
     const perm = await navigator.permissions?.query({ name: 'geolocation' });

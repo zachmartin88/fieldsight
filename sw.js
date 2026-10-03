@@ -3,17 +3,15 @@
 //  - Crop tiles (the fixed 0.01° lookup tiles): cache-first. They never change, so anything fetched
 //    while driving is kept (recent cache, trimmed), and routes saved for offline live in their own
 //    cache until deleted.
-const SHELL = 'fs-shell-v14';
+const SHELL = 'fs-shell-v16';
 const RECENT = 'fs-tiles-recent';
 const SAVED = 'fs-tiles-saved';
 const RECENT_MAX = 5000;
 
 const SHELL_FILES = [
-  './', 'index.html', 'style.css', 'app.js', 'data.js', 'fields.js', 'offline.js', 'cdl-classes.js', 'palette.js', 'regions.js', 'share.js', 'album.js', 'ahead.js', 'parcels.js', 'belts.js', 'fun.js', 'games.js', 'season.js', 'onboarding.js', 'data/states.json', 'data/crops.json',
+  './', 'index.html', 'style.css', 'app.js', 'data.js', 'fields.js', 'offline.js', 'cdl-classes.js', 'palette.js', 'regions.js', 'share.js', 'album.js', 'ahead.js', 'parcels.js', 'belts.js', 'fun.js', 'games.js', 'season.js', 'onboarding.js', 'native.js', 'data/states.json', 'data/crops.json',
   'config.js', 'icon.svg', 'manifest.webmanifest',
-  'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css',
-  'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js',
-  'https://cdn.jsdelivr.net/npm/leaflet-rotate@0.2.8/dist/leaflet-rotate-src.js',
+  'vendor/leaflet.css', 'vendor/leaflet.js', 'vendor/leaflet-rotate.js',
 ];
 
 self.addEventListener('install', (e) => {

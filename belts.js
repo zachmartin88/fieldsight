@@ -159,7 +159,7 @@ export class BeltLayer {
 
   // Screen rectangles of the visible callouts (so state bubbles stay clear of them).
   rects() {
-    if (!this.enabled) return [];
+    if (!this.enabled || !this.map.getSize().x) return [];
     const z = this.map.getZoom();
     return BELTS.filter((b) => z >= b.minZ && z <= b.maxZ).map((b) => {
       const p = this.map.latLngToContainerPoint(b.at), s = b.size * (z <= 4 ? 0.82 : z >= 6 ? 1.12 : 1);

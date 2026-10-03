@@ -118,8 +118,8 @@ export function satelliteHtml(lat, lon, z = 16) {
 
 const FEATURED = [1, 5, 24, 2, 3, 36, 69, 75, 43, 6, 10, 41, 4, 21, 28, 31, 72, 68, 66, 74, 45, 70, 242, 221, 229, 54, 206, 204, 23, 22, 12, 48, 49, 76, 77, 46, 42, 33, 32, 11];
 
-export function cropOfTheDay() {
-  const day = Math.floor(Date.now() / 86400000);
+export function cropOfTheDay(at = new Date()) {
+  const day = Math.floor((at.getTime() - at.getTimezoneOffset() * 60000) / 86400000);
   const order = shuffle(FEATURED, rng('fieldsight-crops'));
   return order[day % order.length];
 }
